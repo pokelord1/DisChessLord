@@ -757,6 +757,37 @@ async def consultar_elo(
     )
 
 
+@bot.tree.command(name="ranking", description="Veja o ranking global dos melhores jogadores de xadrez.")
+async def ranking(interaction: discord.Interaction):
+    if not user_elo:
+        await interaction.response.send_message("📊 Ainda não há registos de ELO no ranking.", ephemeral=True)
+        return
+
+    # Ordena os utilizadores por ELO decrescente
+    ranking_ordenado = sorted(user_elo.items(), key=lambda item: item[1], reverse=True)
+    
+    # Pega apenas os 10 melhores para não ficar muito longo
+    top_10 = ranking_ordenado[:10]
+
+    descricao = []
+    medalhas = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+    for index, (user_id, elo) in enumerate(top_10):
+        emoji = medalhas[index] if index < len(medalhas) else "🔹"
+        # Tenta buscar o membro no servidor para mostrar a menção correta
+        membro = interaction.guild.get_member(user_id) if interaction.guild else None
+        nome = membro.mention if membro else f"Utilizador ID: {user_id}"
+        descricao.append(f"{emoji} {nome} — **{elo} ELO**")
+
+    embed = discord.Embed(
+        title="🏆 Ranking Global — Dischess Hub",
+        description="\n".join(descricao),
+        color=discord.Color.gold()
+    )
+    embed.set_footer(text="Jogue partidas com /desafiar para subir no ranking!")
+
+    await interaction.response.send_message(embed=embed)
+
 # ============================================================
 # INICIALIZAÇÃO
 # ============================================================
