@@ -1,8 +1,3 @@
-# fly.toml app configuration file generated for dischess-hub on 2026-11-02T18:20:25Z
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
-
 app = 'dischess-hub'
 primary_region = 'gru'
 
@@ -10,15 +5,13 @@ primary_region = 'gru'
   builder = 'paketobuildpacks/builder:base'
 
 [processes]
-  app = 'python main.py'
+  app = "python main.py"
 
 [http_service]
   internal_port = 8080
-  force_https = true
-  auto_stop_machines = 'stop'
+  auto_stop_machines = false
   auto_start_machines = true
-  min_machines_running = 0
-  processes = ['app']
+  min_machines_running = 1
 
 [[vm]]
   memory = '1gb'
