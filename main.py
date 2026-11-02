@@ -9,6 +9,23 @@ import chess
 import discord
 from discord import app_commands
 from discord.ext import commands
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# Servidor HTTP simples para satisfazer o Fly.io e manter o bot 24/7
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Dischess Hub is online!")
+
+def run_web_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    server.serve_forever()
+
+# Inicia o servidor web numa thread secundária em segundo plano
+threading.Thread(target=run_web_server, daemon=True).start()
 
 # ============================================================
 # CONFIGURAÇÃO DO BOT
