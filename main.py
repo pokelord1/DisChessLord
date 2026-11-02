@@ -9,23 +9,6 @@ import chess
 import discord
 from discord import app_commands
 from discord.ext import commands
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-# Servidor HTTP simples para satisfazer o Fly.io e manter o bot 24/7
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Dischess Hub is online!")
-
-def run_web_server():
-    port = int(os.getenv("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
-    server.serve_forever()
-
-# Inicia o servidor web numa thread secundária em segundo plano
-threading.Thread(target=run_web_server, daemon=True).start()
 
 # ============================================================
 # CONFIGURAÇÃO DO BOT
@@ -780,10 +763,7 @@ async def ranking(interaction: discord.Interaction):
         await interaction.response.send_message("📊 Ainda não há registos de ELO no ranking.", ephemeral=True)
         return
 
-    # Ordena os utilizadores por ELO decrescente
     ranking_ordenado = sorted(user_elo.items(), key=lambda item: item[1], reverse=True)
-    
-    # Pega apenas os 10 melhores para não ficar muito longo
     top_10 = ranking_ordenado[:10]
 
     descricao = []
@@ -791,7 +771,6 @@ async def ranking(interaction: discord.Interaction):
 
     for index, (user_id, elo) in enumerate(top_10):
         emoji = medalhas[index] if index < len(medalhas) else "🔹"
-        # Tenta buscar o membro no servidor para mostrar a menção correta
         membro = interaction.guild.get_member(user_id) if interaction.guild else None
         nome = membro.mention if membro else f"Utilizador ID: {user_id}"
         descricao.append(f"{emoji} {nome} — **{elo} ELO**")
@@ -804,6 +783,7 @@ async def ranking(interaction: discord.Interaction):
     embed.set_footer(text="Jogue partidas com /desafiar para subir no ranking!")
 
     await interaction.response.send_message(embed=embed)
+
 
 # ============================================================
 # INICIALIZAÇÃO
