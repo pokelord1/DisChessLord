@@ -14,9 +14,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 ELO_FILE = "elo_data.json"
 user_elo = {}
-active_games = {}  # {channel_id: {"board": chess.Board(), "white": user_id, "black": user_id, "draw_offered_by": None, "selected_square": None}}
+active_games = {}  # {channel_id: {"board": chess.Board(), "white": user_id, "black": user_id, "draw_offered_by": None, "selected_square": None, "history_moves": []}}
 
-# ID do Dono do Bot (Apenas você pode resetar o sistema)
 ADMIN_ID = 1369324713498906786
 
 def load_elo():
@@ -36,11 +35,12 @@ def get_user_data(user_id):
     uid = str(user_id)
     if uid not in user_elo:
         user_elo[uid] = {
-            "elo": 100,  # ELO Inicial Padrão: 100
+            "elo": 100,
             "peak_elo": 100,
             "wins": 0,
             "losses": 0,
-            "draws": 0
+            "draws": 0,
+            "match_history": []  # Lista de partidas guardadas
         }
         save_elo()
     else:
@@ -51,8 +51,12 @@ def get_user_data(user_id):
                 "peak_elo": old_val,
                 "wins": 0,
                 "losses": 0,
-                "draws": 0
+                "draws": 0,
+                "match_history": []
             }
+            save_elo()
+        if "match_history" not in user_elo[uid]:
+            user_elo[uid]["match_history"] = []
             save_elo()
     return user_elo[uid]
 
@@ -139,17 +143,49 @@ def desenhar_tabuleiro(board: chess.Board):
     linhas.append("    a   b   c   d   e   f   g   h")
     return "```\n" + "\n".join(linhas) + "\n```"
 
-def registrar_resultado(vencedor_id, perdedor_id, eh_empate=False):
+def registrar_historico_partida(white_user, black_user, vencedor_id, eh_empate, motivo, lances_uci):
+    w_data = get_user_data(white_user.id)
+    b_data = get_user_data(black_user.id)
+
+    id_partida_w = len(w_data["match_history"]) + 1
+    id_partida_b = len(b_data["match_history"]) + 1
+
     if eh_empate:
-        data1 = get_user_data(vencedor_id)
-        data2 = get_user_data(perdedor_id)
-        data1["draws"] += 1
-        data2["draws"] += 1
+        res_w, res_b = "Empate", "Empate"
+        w_data["draws"] += 1
+        b_data["draws"] += 1
+    elif vencedor_id == white_user.id:
+        res_w, res_b = "Vitória", "Derrota"
+        w_data["wins"] += 1
+        b_data["losses"] += 1
     else:
-        v_data = get_user_data(vencedor_id)
-        p_data = get_user_data(perdedor_id)
-        v_data["wins"] += 1
-        p_data["losses"] += 1
+        res_w, res_b = "Derrota", "Vitória"
+        w_data["losses"] += 1
+        b_data["wins"] += 1
+
+    match_info_w = {
+        "id": id_partida_w,
+        "oponente": black_user.name,
+        "oponente_id": black_user.id,
+        "resultado": res_w,
+        "motivo": motivo,
+        "cor": "Brancas",
+        "lances": lances_uci
+    }
+
+    match_info_b = {
+        "id": id_partida_b,
+        "oponente": white_user.name,
+        "oponente_id": white_user.id,
+        "resultado": res_b,
+        "motivo": motivo,
+        "cor": "Pretas",
+        "lances": lances_uci
+    }
+
+    w_data["match_history"].append(match_info_w)
+    b_data["match_history"].append(match_info_b)
+    save_elo()
 
 # --- SISTEMA DE BOTÕES DE PEÇAS E MOVIMENTOS ---
 
@@ -259,6 +295,7 @@ class ChessBoardView(View):
                     move = chess.Move(from_sq, to_sq, promotion=chess.QUEEN)
 
             board.push(move)
+            game["history_moves"].append(move.uci())
             game["selected_square"] = None
             game["draw_offered_by"] = None
 
@@ -274,15 +311,15 @@ class ChessBoardView(View):
                     w_elo += int(k * (1 - 1/(1 + 10**((b_elo - w_elo)/400))))
                     b_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
                     msg_fim = f"🏆 **Fim de Jogo!** As Brancas ({white.mention}) venceram por xeque-mate!"
-                    registrar_resultado(white.id, black.id, eh_empate=False)
+                    registrar_historico_partida(white, black, white.id, False, "Xeque-Mate", game["history_moves"])
                 elif result == "0-1":
                     w_elo += int(k * (0 - 1/(1 + 10**((b_elo - w_elo)/400))))
                     b_elo += int(k * (1 - 1/(1 + 10**((w_elo - b_elo)/400))))
                     msg_fim = f"🏆 **Fim de Jogo!** As Pretas ({black.mention}) venceram por xeque-mate!"
-                    registrar_resultado(black.id, white.id, eh_empate=False)
+                    registrar_historico_partida(white, black, black.id, False, "Xeque-Mate", game["history_moves"])
                 else:
                     msg_fim = "🤝 **Fim de Jogo!** A partida terminou em empate."
-                    registrar_resultado(white.id, black.id, eh_empate=True)
+                    registrar_historico_partida(white, black, None, True, "Empate", game["history_moves"])
 
                 w_data["elo"] = max(0, w_elo)
                 b_data["elo"] = max(0, b_elo)
@@ -345,7 +382,7 @@ class ChessBoardView(View):
             await interaction.response.send_message("Já propuseste um empate. Aguarda o oponente!", ephemeral=True)
         else:
             white, black = game["white"], game["black"]
-            registrar_resultado(white.id, black.id, eh_empate=True)
+            registrar_historico_partida(white, black, None, True, "Acordo de Empate", game["history_moves"])
             save_elo()
             del active_games[self.channel_id]
             await interaction.response.edit_message(content=f"🤝 **Empate Aceito!** A partida entre {white.mention} e {black.mention} terminou em empate.", embed=None, view=None)
@@ -369,7 +406,7 @@ class ChessBoardView(View):
             w_elo += int(k * (1 - 1/(1 + 10**((b_elo - w_elo)/400))))
             b_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
         else:
-            w_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
+            w_elo += int(k * (0 - 1/(1 + 10**((b_elo - w_elo)/400))))
             b_elo += int(k * (1 - 1/(1 + 10**((w_elo - b_elo)/400))))
 
         w_data["elo"] = max(0, w_elo)
@@ -377,7 +414,7 @@ class ChessBoardView(View):
         w_data["peak_elo"] = max(w_data["peak_elo"], w_data["elo"])
         b_data["peak_elo"] = max(b_data["peak_elo"], b_data["elo"])
 
-        registrar_resultado(vencedor.id, perdedor.id, eh_empate=False)
+        registrar_historico_partida(white, black, vencedor.id, False, "Desistência", game["history_moves"])
         save_elo()
 
         if interaction.guild:
@@ -413,7 +450,6 @@ async def desafiar(interaction: discord.Interaction, oponente: discord.Member):
         await interaction.response.send_message("Já existe uma partida de xadrez a decorrer neste canal!", ephemeral=True)
         return
 
-    # Garante que os dois já têm registro com 100 ELO no mínimo
     u1_data = get_user_data(interaction.user.id)
     u2_data = get_user_data(oponente.id)
 
@@ -422,7 +458,8 @@ async def desafiar(interaction: discord.Interaction, oponente: discord.Member):
         "white": interaction.user,
         "black": oponente,
         "draw_offered_by": None,
-        "selected_square": None
+        "selected_square": None,
+        "history_moves": []
     }
 
     board = active_games[channel_id]["board"]
@@ -437,10 +474,89 @@ async def desafiar(interaction: discord.Interaction, oponente: discord.Member):
 
     await interaction.response.send_message(embed=embed, view=view)
 
+@bot.tree.command(name="historico", description="Lista o histórico de partidas do jogador.")
+async def historico(interaction: discord.Interaction, membro: discord.Member = None):
+    target = membro or interaction.user
+    data = get_user_data(target.id)
+    partidas = data.get("match_history", [])
+
+    if not partidas:
+        await interaction.response.send_message(f"📜 **{target.name}** ainda não jogou nenhuma partida registrada.", ephemeral=True)
+        return
+
+    linhas = []
+    for p in partidas[-10:]:  # Mostra as últimas 10
+        emoji_res = "🟢" if p["resultado"] == "Vitória" else ("🔴" if p["resultado"] == "Derrota" else "🟡")
+        linhas.append(f"{emoji_res} **Partida {p['id']}**: {p['resultado']} vs `{p['oponente']}` *(Motivo: {p['motivo']})*")
+
+    embed = discord.Embed(
+        title=f"📜 Histórico de Partidas — {target.name}",
+        description="\n".join(linhas),
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text="Use /analisar <número> para ver os detalhes de uma partida!")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="analisar", description="Exibe a análise tática detalhada de uma partida pelo ID.")
+async def analisar(interaction: discord.Interaction, id_partida: int, membro: discord.Member = None):
+    target = membro or interaction.user
+    data = get_user_data(target.id)
+    partidas = data.get("match_history", [])
+
+    match = next((p for p in partidas if p["id"] == id_partida), None)
+    if not match:
+        await interaction.response.send_message(f"❌ Partida ID `{id_partida}` não encontrada no histórico de **{target.name}**.", ephemeral=True)
+        return
+
+    # Reconstruir partida com python-chess para analisar
+    temp_board = chess.Board()
+    xeques = 0
+    capturas_brancas = 0
+    capturas_pretas = 0
+    lances_uci = match.get("lances", [])
+
+    for move_str in lances_uci:
+        try:
+            m = chess.Move.from_uci(move_str)
+            if temp_board.is_capture(m):
+                if temp_board.turn == chess.WHITE:
+                    capturas_brancas += 1
+                else:
+                    capturas_pretas += 1
+
+            temp_board.push(m)
+            if temp_board.is_check():
+                xeques += 1
+        except Exception:
+            pass
+
+    total_jogadas = len(lances_uci)
+    tabuleiro_final = desenhar_tabuleiro(temp_board)
+
+    embed = discord.Embed(
+        title=f"🔍 Análise da Partida {match['id']} — {target.name}",
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="⚔️ Oponente", value=f"`{match['oponente']}`", inline=True)
+    embed.add_field(name="🏆 Resultado", value=f"`{match['resultado']}`", inline=True)
+    embed.add_field(name="📌 Fim de jogo", value=f"`{match['motivo']}`", inline=True)
+
+    embed.add_field(name="♟️ Total de Lances", value=f"`{total_jogadas}`", inline=True)
+    embed.add_field(name="⚡ Xeques Aplicados", value=f"`{xeques}`", inline=True)
+    embed.add_field(name="💥 Capturas", value=f"Brancas: `{capturas_brancas}` | Pretas: `{capturas_pretas}`", inline=True)
+
+    embed.add_field(
+        name="🏁 Posição Final do Tabuleiro",
+        value=tabuleiro_final,
+        inline=False
+    )
+
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="perfil", description="Exibe a Carteirinha de Enxadrista (a tua ou de outro membro).")
 async def perfil(interaction: discord.Interaction, membro: discord.Member = None):
     target = membro or interaction.user
-    data = get_user_data(target.id)  # Auto-registra com 100 ELO se for a 1ª vez
+    data = get_user_data(target.id)
 
     elo_atual = data["elo"]
     peak_elo = data["peak_elo"]
@@ -493,9 +609,8 @@ async def perfil(interaction: discord.Interaction, membro: discord.Member = None
 @bot.tree.command(name="ranking", description="Mostra o ranking global do servidor.")
 async def ranking(interaction: discord.Interaction):
     guild = interaction.guild
-    
-    # Se ainda não houver nenhum dado registrado no banco, popula temporariamente com os membros do servidor
     ranking_data = dict(user_elo)
+    
     if not ranking_data and guild:
         for member in guild.members:
             if not member.bot:
@@ -531,7 +646,6 @@ async def ranking(interaction: discord.Interaction):
     embed.set_footer(text="Jogue partidas com /desafiar para subir no ranking!")
     await interaction.response.send_message(embed=embed)
 
-# COMANDO EXCLUSIVO DE ADMINISTRADOR / RESETAR TUDO
 @bot.tree.command(name="resetar_tudo", description="[ADMIN] Reseta todos os ELOs, estatísticas e cargos de patentes.")
 async def resetar_tudo(interaction: discord.Interaction):
     if interaction.user.id != ADMIN_ID:
