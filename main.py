@@ -15,6 +15,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 ELO_FILE = "elo_data.json"
 user_elo = {}
 active_games = {}  # {channel_id: {"board": chess.Board(), "white": user_id, "black": user_id, "draw_offered_by": None, "selected_square": None, "history_moves": []}}
+pending_challenges = {}  # {channel_id: {"challenger": Member, "opponent": Member}}
 
 ADMIN_ID = 1369324713498906786
 
@@ -40,7 +41,7 @@ def get_user_data(user_id):
             "wins": 0,
             "losses": 0,
             "draws": 0,
-            "match_history": []  # Lista de partidas guardadas
+            "match_history": []
         }
         save_elo()
     else:
@@ -118,29 +119,30 @@ def desenhar_tabuleiro(board: chess.Board):
     pecas_unicode = {
         'R': '♖', 'N': '♘', 'B': '♗', 'Q': '♕', 'K': '♔', 'P': '♙',
         'r': '♜', 'n': '♞', 'b': '♝', 'q': '♛', 'k': '♚', 'p': '♟',
-        '.': '.'
+        '.': '·'
     }
     
     linhas = []
-    linhas.append("    a   b   c   d   e   f   g   h")
-    linhas.append("  +---+---+---+---+---+---+---+---+")
+    linhas.append("  a b c d e f g h")
+    linhas.append(" ╔═══════════════╗")
     
     fen_board = board.fen().split()[0]
     ranks = fen_board.split('/')
     
     for i, rank in enumerate(ranks):
-        row_str = f"{8 - i} |"
+        row_str = f"{8 - i}║"
+        elements = []
         for char in rank:
             if char.isdigit():
                 for _ in range(int(char)):
-                    row_str += " . |"
+                    elements.append("·")
             else:
-                row_str += f" {pecas_unicode.get(char, char)} |"
-        row_str += f" {8 - i}"
+                elements.append(pecas_unicode.get(char, char))
+        row_str += " ".join(elements) + f"║{8 - i}"
         linhas.append(row_str)
-        linhas.append("  +---+---+---+---+---+---+---+---+")
         
-    linhas.append("    a   b   c   d   e   f   g   h")
+    linhas.append(" ╚═══════════════╝")
+    linhas.append("  a b c d e f g h")
     return "```\n" + "\n".join(linhas) + "\n```"
 
 def registrar_historico_partida(white_user, black_user, vencedor_id, eh_empate, motivo, lances_uci):
@@ -186,6 +188,73 @@ def registrar_historico_partida(white_user, black_user, vencedor_id, eh_empate, 
     w_data["match_history"].append(match_info_w)
     b_data["match_history"].append(match_info_b)
     save_elo()
+
+def jogador_em_jogo_ou_desafio(user_id):
+    # Verifica se o jogador já está em uma partida ativa
+    for g in active_games.values():
+        if user_id in (g["white"].id, g["black"].id):
+            return True, "em uma partida ativa"
+    # Verifica se tem um desafio pendente enviado ou recebido
+    for c in pending_challenges.values():
+        if user_id in (c["challenger"].id, c["opponent"].id):
+            return True, "em um desafio pendente"
+    return False, ""
+
+# --- SISTEMA DE PAINEL DE CONVITE ---
+
+class ChallengeView(View):
+    def __init__(self, channel_id, challenger, opponent):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+        self.challenger = challenger
+        self.opponent = opponent
+
+    @Button(label="Aceitar Desafio", style=discord.ButtonStyle.success, emoji="⚔️")
+    async def aceitar(self, interaction: discord.Interaction, button_obj: Button):
+        if interaction.user.id != self.opponent.id:
+            await interaction.response.send_message("❌ Apenas o jogador desafiado pode aceitar este convite!", ephemeral=True)
+            return
+
+        if self.channel_id not in pending_challenges:
+            await interaction.response.send_message("❌ Este convite já expirou ou foi cancelado.", ephemeral=True)
+            return
+
+        del pending_challenges[self.channel_id]
+
+        active_games[self.channel_id] = {
+            "board": chess.Board(),
+            "white": self.challenger,
+            "black": self.opponent,
+            "draw_offered_by": None,
+            "selected_square": None,
+            "history_moves": []
+        }
+
+        board = active_games[self.channel_id]["board"]
+        tabuleiro_txt = desenhar_tabuleiro(board)
+        view = ChessBoardView(self.channel_id)
+
+        u1_data = get_user_data(self.challenger.id)
+        u2_data = get_user_data(self.opponent.id)
+
+        embed = discord.Embed(
+            title="⚔️ Partida de Xadrez Iniciada!",
+            description=f"**Brancas:** {self.challenger.mention} ({u1_data['elo']} ELO)\n**Pretas:** {self.opponent.mention} ({u2_data['elo']} ELO)\n\n**Vez de:** {self.challenger.mention} (Brancas)\n{tabuleiro_txt}\nClique na peça que deseja mover:",
+            color=discord.Color.blue()
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    @Button(label="Cancelar / Recusar", style=discord.ButtonStyle.danger, emoji="❌")
+    async def cancelar(self, interaction: discord.Interaction, button_obj: Button):
+        if interaction.user.id not in (self.challenger.id, self.opponent.id):
+            await interaction.response.send_message("❌ Não podes intervir neste desafio!", ephemeral=True)
+            return
+
+        if self.channel_id in pending_challenges:
+            del pending_challenges[self.channel_id]
+
+        msg = f"❌ O desafio de xadrez foi cancelado por {interaction.user.mention}."
+        await interaction.response.edit_message(content=msg, embed=None, view=None)
 
 # --- SISTEMA DE BOTÕES DE PEÇAS E MOVIMENTOS ---
 
@@ -439,39 +508,41 @@ async def on_ready():
 @bot.tree.command(name="desafiar", description="Desafia outro membro para uma partida de xadrez.")
 async def desafiar(interaction: discord.Interaction, oponente: discord.Member):
     if oponente == interaction.user:
-        await interaction.response.send_message("Não podes jogar contra ti próprio!", ephemeral=True)
+        await interaction.response.send_message("❌ Não podes jogar contra ti próprio!", ephemeral=True)
         return
     if oponente.bot:
-        await interaction.response.send_message("Não podes jogar contra bots do Discord!", ephemeral=True)
+        await interaction.response.send_message("❌ Não podes jogar contra bots do Discord!", ephemeral=True)
         return
 
     channel_id = interaction.channel.id
-    if channel_id in active_games:
-        await interaction.response.send_message("Já existe uma partida de xadrez a decorrer neste canal!", ephemeral=True)
+
+    if channel_id in active_games or channel_id in pending_challenges:
+        await interaction.response.send_message("❌ Já existe uma partida ou desafio em andamento neste canal!", ephemeral=True)
         return
 
-    u1_data = get_user_data(interaction.user.id)
-    u2_data = get_user_data(oponente.id)
+    # Validação do Desafiante
+    em_jogo, motivo = jogador_em_jogo_ou_desafio(interaction.user.id)
+    if em_jogo:
+        await interaction.response.send_message(f"❌ Tu já estás {motivo}! Termina o desafio/partida antes de criar um novo.", ephemeral=True)
+        return
 
-    active_games[channel_id] = {
-        "board": chess.Board(),
-        "white": interaction.user,
-        "black": oponente,
-        "draw_offered_by": None,
-        "selected_square": None,
-        "history_moves": []
+    # Validação do Oponente
+    em_jogo_op, motivo_op = jogador_em_jogo_ou_desafio(oponente.id)
+    if em_jogo_op:
+        await interaction.response.send_message(f"❌ {oponente.mention} já está {motivo_op} e não pode aceitar novos desafios no momento.", ephemeral=True)
+        return
+
+    pending_challenges[channel_id] = {
+        "challenger": interaction.user,
+        "opponent": oponente
     }
 
-    board = active_games[channel_id]["board"]
-    tabuleiro_txt = desenhar_tabuleiro(board)
-    view = ChessBoardView(channel_id)
-
+    view = ChallengeView(channel_id, interaction.user, oponente)
     embed = discord.Embed(
-        title="⚔️ Partida de Xadrez Iniciada!",
-        description=f"**Brancas:** {interaction.user.mention} ({u1_data['elo']} ELO)\n**Pretas:** {oponente.mention} ({u2_data['elo']} ELO)\n\n**Vez de:** {interaction.user.mention} (Brancas)\n{tabuleiro_txt}\nClique na peça que deseja mover:",
-        color=discord.Color.blue()
+        title="⚔️ Desafio de Xadrez!",
+        description=f"{interaction.user.mention} desafiou {oponente.mention} para uma partida de xadrez!\n\n{oponente.mention}, clica em **Aceitar Desafio** para começar a jogar.",
+        color=discord.Color.gold()
     )
-
     await interaction.response.send_message(embed=embed, view=view)
 
 @bot.tree.command(name="historico", description="Lista o histórico de partidas do jogador.")
@@ -485,7 +556,7 @@ async def historico(interaction: discord.Interaction, membro: discord.Member = N
         return
 
     linhas = []
-    for p in partidas[-10:]:  # Mostra as últimas 10
+    for p in partidas[-10:]:
         emoji_res = "🟢" if p["resultado"] == "Vitória" else ("🔴" if p["resultado"] == "Derrota" else "🟡")
         linhas.append(f"{emoji_res} **Partida {p['id']}**: {p['resultado']} vs `{p['oponente']}` *(Motivo: {p['motivo']})*")
 
@@ -508,7 +579,6 @@ async def analisar(interaction: discord.Interaction, id_partida: int, membro: di
         await interaction.response.send_message(f"❌ Partida ID `{id_partida}` não encontrada no histórico de **{target.name}**.", ephemeral=True)
         return
 
-    # Reconstruir partida com python-chess para analisar
     temp_board = chess.Board()
     xeques = 0
     capturas_brancas = 0
@@ -652,8 +722,10 @@ async def resetar_tudo(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Apenas o dono do bot tem permissão para usar este comando!", ephemeral=True)
         return
 
-    global user_elo
+    global user_elo, pending_challenges, active_games
     user_elo = {}
+    pending_challenges = {}
+    active_games = {}
     save_elo()
 
     guild = interaction.guild
