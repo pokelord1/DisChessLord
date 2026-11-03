@@ -1680,7 +1680,6 @@ async def desafiar(
 
         raise
 
-
 # ============================================================
 # 12. COMANDO: PERFIL
 # ============================================================
@@ -1701,6 +1700,7 @@ async def perfil(
     dados = obter_dados_usuario(jogador.id)
 
     elo = dados["elo"]
+    peak_elo = dados["peak_elo"]
 
     partidas = (
         dados["wins"]
@@ -1714,8 +1714,73 @@ async def perfil(
         else 0
     )
 
+    patente = obter_patente(elo)
+
+    # Progresso para a próxima patente
+    if elo < 500:
+        proximo_elo = 500
+        proxima_patente = "Amador"
+
+    elif elo < 1000:
+        proximo_elo = 1000
+        proxima_patente = "Intermediário"
+
+    elif elo < 1500:
+        proximo_elo = 1500
+        proxima_patente = "Mestre"
+
+    elif elo < 2000:
+        proximo_elo = 2000
+        proxima_patente = "Grão-Mestre"
+
+    elif elo < 3000:
+        proximo_elo = 3000
+        proxima_patente = "Lenda do Xadrez"
+
+    elif elo < 50000:
+        proximo_elo = 50000
+        proxima_patente = "Deus do Xadrez"
+
+    else:
+        proximo_elo = None
+        proxima_patente = None
+
+    if proximo_elo is not None:
+        elo_atual_patente = {
+            "Iniciante": 0,
+            "Amador": 500,
+            "Intermediário": 1000,
+            "Mestre": 1500,
+            "Grão-Mestre": 2000,
+            "Lenda do Xadrez": 3000
+        }.get(patente, 0)
+
+        progresso = (
+            (elo - elo_atual_patente)
+            / (proximo_elo - elo_atual_patente)
+        ) * 100
+
+        progresso = max(0, min(100, progresso))
+
+        blocos_preenchidos = round(progresso / 10)
+
+        barra = (
+            "▰" * blocos_preenchidos
+            + "▱" * (10 - blocos_preenchidos)
+        )
+
+        texto_progresso = (
+            f"{barra} `{progresso:.0f}%` "
+            f"({elo}/{proximo_elo} ELO)"
+        )
+
+    else:
+        texto_progresso = (
+            "🏆 Você alcançou a patente máxima!"
+        )
+
     embed = discord.Embed(
-        title=f"♟️ Perfil de {jogador.display_name}",
+        title=f"👤 Perfil de: {jogador.display_name}",
         color=discord.Color.blurple()
     )
 
@@ -1724,56 +1789,54 @@ async def perfil(
     )
 
     embed.add_field(
-        name="ELO",
-        value=f"**{elo}**",
-        inline=True
+        name="🏆 ELO Atual",
+        value=f"`{elo}`",
+        inline=False
     )
 
     embed.add_field(
-        name="Patente",
-        value=obter_patente(elo),
-        inline=True
+        name="📈 Maior ELO (Peak)",
+        value=f"`{peak_elo}`",
+        inline=False
     )
 
     embed.add_field(
-        name="Recorde de ELO",
-        value=str(dados["peak_elo"]),
-        inline=True
+        name="👑 Patente",
+        value=f"`{patente}`",
+        inline=False
     )
 
     embed.add_field(
-        name="Vitórias",
-        value=str(dados["wins"]),
-        inline=True
+        name="⚔️ Partidas Jogadas",
+        value=f"`{partidas}`",
+        inline=False
     )
 
     embed.add_field(
-        name="Derrotas",
-        value=str(dados["losses"]),
-        inline=True
+        name="🎯 Win Rate",
+        value=f"`{taxa_vitoria:.1f}%`",
+        inline=False
     )
 
     embed.add_field(
-        name="Empates",
-        value=str(dados["draws"]),
-        inline=True
+        name="📊 V / D / E",
+        value=(
+            f"`{dados['wins']}W` / "
+            f"`{dados['losses']}L` / "
+            f"`{dados['draws']}D`"
+        ),
+        inline=False
     )
 
     embed.add_field(
-        name="Partidas",
-        value=str(partidas),
-        inline=True
+        name=f"🚀 Progresso para {proxima_patente or 'Deus do Xadrez'}",
+        value=texto_progresso,
+        inline=False
     )
 
-    embed.add_field(
-        name="Taxa de vitória",
-        value=f"{taxa_vitoria:.1f}%",
-        inline=True
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-
+    await interaction.response.send_message(
+        embed=embed
+    ) 
 # ============================================================
 # 13. COMANDO: RANKING
 # ============================================================
