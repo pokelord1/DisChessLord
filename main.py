@@ -179,14 +179,12 @@ def classificar_lance_stockfish(board_antes: chess.Board, move: chess.Move):
         best = eval_stockfish.get("best_move")
         if best and move.uci() == best:
             if is_capture and board_antes.piece_at(move.from_square).piece_type in (chess.BISHOP, chess.KNIGHT, chess.ROOK, chess.QUEEN):
-                # Sacrifício tático apontado pelo Stockfish
                 return "💎 Brilhante!!", f"Lance recomendado pelo Stockfish (`{best}`): Sacrifício tático perfeito!"
             return "🟢 Melhor Lance (Stockfish)", f"A jogada feita (`{move.uci()}`) foi exatamente a recomendação nº 1 do Stockfish!"
 
     if board_depois.is_check():
         return "🟢 Ótimo Lance", "Xeque preciso mantendo pressão no Rei adversário."
 
-    # Checa erros graves por pendura
     turn = board_antes.turn
     piece_moved = board_antes.piece_at(move.from_square)
     atritado = board_depois.attackers(not turn, move.to_square)
@@ -304,24 +302,24 @@ class MatchAnalysisView(View):
 
         return embed
 
-    @Button(label="⏮️ Início", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="⏮️ Início", style=discord.ButtonStyle.secondary)
     async def inicio(self, interaction: discord.Interaction, button: Button):
         self.index = 0
         await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
 
-    @Button(label="◀️ Voltar", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="◀️ Voltar", style=discord.ButtonStyle.primary)
     async def voltar(self, interaction: discord.Interaction, button: Button):
         if self.index > 0:
             self.index -= 1
         await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
 
-    @Button(label="Avançar ▶️", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Avançar ▶️", style=discord.ButtonStyle.primary)
     async def avancar(self, interaction: discord.Interaction, button: Button):
         if self.index < len(self.historico_estados) - 1:
             self.index += 1
         await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
 
-    @Button(label="⏭️ Fim", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="⏭️ Fim", style=discord.ButtonStyle.secondary)
     async def fim(self, interaction: discord.Interaction, button: Button):
         self.index = len(self.historico_estados) - 1
         await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
@@ -335,7 +333,7 @@ class ChallengeView(View):
         self.challenger = challenger
         self.opponent = opponent
 
-    @Button(label="Aceitar Desafio", style=discord.ButtonStyle.success, emoji="⚔️")
+    @discord.ui.button(label="Aceitar Desafio", style=discord.ButtonStyle.success, emoji="⚔️")
     async def aceitar(self, interaction: discord.Interaction, button_obj: Button):
         if interaction.user.id != self.opponent.id:
             await interaction.response.send_message("❌ Apenas o jogador desafiado pode aceitar este convite!", ephemeral=True)
@@ -370,7 +368,7 @@ class ChallengeView(View):
         )
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
-    @Button(label="Cancelar / Recusar", style=discord.ButtonStyle.danger, emoji="❌")
+    @discord.ui.button(label="Cancelar / Recusar", style=discord.ButtonStyle.danger, emoji="❌")
     async def cancelar(self, interaction: discord.Interaction, button_obj: Button):
         if interaction.user.id not in (self.challenger.id, self.opponent.id):
             await interaction.response.send_message("❌ Não podes intervir neste desafio!", ephemeral=True)
@@ -533,7 +531,7 @@ class ChessBoardView(View):
 
             self.montar_botoes()
             proxima_vez = game["white"] if board.turn == chess.WHITE else game["black"]
-            tabuleiro_txt = desenhar_tabuleiro(board)
+            tabuleiro_txt = desenhar_tabuleiro(game["board"])
 
             embed = discord.Embed(
                 title="♟️ Partida em Andamento",
