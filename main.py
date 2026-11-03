@@ -36,12 +36,13 @@ def get_user_data(user_id):
     uid = str(user_id)
     if uid not in user_elo:
         user_elo[uid] = {
-            "elo": 100,  # ELO Inicial Ajustado para 100
+            "elo": 100,  # ELO Inicial Padrão: 100
             "peak_elo": 100,
             "wins": 0,
             "losses": 0,
             "draws": 0
         }
+        save_elo()
     else:
         if isinstance(user_elo[uid], int):
             old_val = user_elo[uid]
@@ -52,6 +53,7 @@ def get_user_data(user_id):
                 "losses": 0,
                 "draws": 0
             }
+            save_elo()
     return user_elo[uid]
 
 PATENTES = [
@@ -367,7 +369,7 @@ class ChessBoardView(View):
             w_elo += int(k * (1 - 1/(1 + 10**((b_elo - w_elo)/400))))
             b_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
         else:
-            w_elo += int(k * (0 - 1/(1 + 10**((b_elo - w_elo)/400))))
+            w_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
             b_elo += int(k * (1 - 1/(1 + 10**((w_elo - b_elo)/400))))
 
         w_data["elo"] = max(0, w_elo)
@@ -411,6 +413,10 @@ async def desafiar(interaction: discord.Interaction, oponente: discord.Member):
         await interaction.response.send_message("Já existe uma partida de xadrez a decorrer neste canal!", ephemeral=True)
         return
 
+    # Garante que os dois já têm registro com 100 ELO no mínimo
+    u1_data = get_user_data(interaction.user.id)
+    u2_data = get_user_data(oponente.id)
+
     active_games[channel_id] = {
         "board": chess.Board(),
         "white": interaction.user,
@@ -423,12 +429,9 @@ async def desafiar(interaction: discord.Interaction, oponente: discord.Member):
     tabuleiro_txt = desenhar_tabuleiro(board)
     view = ChessBoardView(channel_id)
 
-    u1_elo = get_user_data(interaction.user.id)["elo"]
-    u2_elo = get_user_data(oponente.id)["elo"]
-
     embed = discord.Embed(
         title="⚔️ Partida de Xadrez Iniciada!",
-        description=f"**Brancas:** {interaction.user.mention} ({u1_elo} ELO)\n**Pretas:** {oponente.mention} ({u2_elo} ELO)\n\n**Vez de:** {interaction.user.mention} (Brancas)\n{tabuleiro_txt}\nClique na peça que deseja mover:",
+        description=f"**Brancas:** {interaction.user.mention} ({u1_data['elo']} ELO)\n**Pretas:** {oponente.mention} ({u2_data['elo']} ELO)\n\n**Vez de:** {interaction.user.mention} (Brancas)\n{tabuleiro_txt}\nClique na peça que deseja mover:",
         color=discord.Color.blue()
     )
 
@@ -437,7 +440,7 @@ async def desafiar(interaction: discord.Interaction, oponente: discord.Member):
 @bot.tree.command(name="perfil", description="Exibe a Carteirinha de Enxadrista (a tua ou de outro membro).")
 async def perfil(interaction: discord.Interaction, membro: discord.Member = None):
     target = membro or interaction.user
-    data = get_user_data(target.id)
+    data = get_user_data(target.id)  # Auto-registra com 100 ELO se for a 1ª vez
 
     elo_atual = data["elo"]
     peak_elo = data["peak_elo"]
@@ -489,12 +492,21 @@ async def perfil(interaction: discord.Interaction, membro: discord.Member = None
 
 @bot.tree.command(name="ranking", description="Mostra o ranking global do servidor.")
 async def ranking(interaction: discord.Interaction):
-    if not user_elo:
+    guild = interaction.guild
+    
+    # Se ainda não houver nenhum dado registrado no banco, popula temporariamente com os membros do servidor
+    ranking_data = dict(user_elo)
+    if not ranking_data and guild:
+        for member in guild.members:
+            if not member.bot:
+                ranking_data[str(member.id)] = {"elo": 100}
+
+    if not ranking_data:
         await interaction.response.send_message("📊 Ainda não há registos de ELO no ranking.", ephemeral=True)
         return
 
     sorted_users = sorted(
-        user_elo.items(),
+        ranking_data.items(),
         key=lambda item: item[1]["elo"] if isinstance(item[1], dict) else item[1],
         reverse=True
     )
@@ -505,7 +517,7 @@ async def ranking(interaction: discord.Interaction):
     for index, (uid, udata) in enumerate(sorted_users[:10], start=1):
         elo_val = udata["elo"] if isinstance(udata, dict) else udata
         
-        user_obj = interaction.guild.get_member(int(uid))
+        user_obj = guild.get_member(int(uid)) if guild else None
         mention = user_obj.mention if user_obj else f"<@{uid}>"
         
         prefix = medals[index - 1] if index <= 3 else f"**{index}.**"
