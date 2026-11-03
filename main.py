@@ -1,833 +1,2035 @@
 import os
+import io
 import json
-import urllib.request
-import urllib.parse
+import uuid
+import asyncio
+import tempfile
+import logging
+
+from datetime import datetime, timezone
+
 import discord
+from discord import app_commands
 from discord.ext import commands
-from discord.ui import View, Button
+
 import chess
+import chess.pgn
 
-# Configuração do Bot
+
+# ============================================================
+# 1. CONFIGURAÇÃO
+# ============================================================
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+if not TOKEN:
+    raise RuntimeError(
+        "A variável de ambiente DISCORD_TOKEN não foi configurada."
+    )
+
+DATA_DIR = os.getenv("DATA_DIR", "/data")
+
+if not os.path.isdir(DATA_DIR):
+    DATA_DIR = "."
+
+ELO_FILE = os.path.join(DATA_DIR, "dischess_data.json")
+
+K_FACTOR = 32
+TEMPO_DESAFIO = 120
+TEMPO_PROMOCAO = 60
+TEMPO_CONFIRMACAO = 30
+
+MOVIMENTOS_POR_PAGINA = 15
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
 intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents
+)
 
-ELO_FILE = "elo_data.json"
-user_elo = {}
+user_data = {}
+
 active_games = {}
 pending_challenges = {}
 
-ADMIN_ID = 1369324713498906786
+game_locks = {}
+challenge_lock = asyncio.Lock()
 
-def load_elo():
-    global user_elo
-    if os.path.exists(ELO_FILE):
-        try:
-            with open(ELO_FILE, "r") as f:
-                user_elo = json.load(f)
-        except Exception:
-            user_elo = {}
+data_loaded = False
 
-def save_elo():
-    with open(ELO_FILE, "w") as f:
-        json.dump(user_elo, f, indent=4)
 
-def get_user_data(user_id):
-    uid = str(user_id)
-    if uid not in user_elo:
-        user_elo[uid] = {
-            "elo": 100,
-            "peak_elo": 100,
-            "wins": 0,
-            "losses": 0,
-            "draws": 0,
-            "match_history": []
-        }
-        save_elo()
-    else:
-        if isinstance(user_elo[uid], int):
-            old_val = user_elo[uid]
-            user_elo[uid] = {
-                "elo": old_val,
-                "peak_elo": old_val,
-                "wins": 0,
-                "losses": 0,
-                "draws": 0,
-                "match_history": []
-            }
-            save_elo()
-        if "match_history" not in user_elo[uid]:
-            user_elo[uid]["match_history"] = []
-            save_elo()
-    return user_elo[uid]
+# ============================================================
+# 2. DADOS E PERSISTÊNCIA
+# ============================================================
+
+def dados_padrao():
+    return {
+        "elo": 400,
+        "peak_elo": 400,
+        "wins": 0,
+        "losses": 0,
+        "draws": 0,
+        "history": []
+    }
+
+
+def carregar_dados():
+    global user_data
+
+    if not os.path.exists(ELO_FILE):
+        user_data = {}
+        logging.info("Arquivo de dados não encontrado. Novo arquivo será criado.")
+        return
+
+    try:
+        with open(ELO_FILE, "r", encoding="utf-8") as arquivo:
+            dados = json.load(arquivo)
+
+        if not isinstance(dados, dict):
+            raise ValueError("O arquivo JSON não contém um objeto válido.")
+
+        user_data = dados
+
+        for user_id, dados_usuario in list(user_data.items()):
+
+            if isinstance(dados_usuario, int):
+                user_data[user_id] = dados_padrao()
+                user_data[user_id]["elo"] = dados_usuario
+                user_data[user_id]["peak_elo"] = dados_usuario
+                continue
+
+            if not isinstance(dados_usuario, dict):
+                raise ValueError(
+                    f"Dados inválidos para o jogador {user_id}."
+                )
+
+            padrao = dados_padrao()
+
+            for chave, valor in padrao.items():
+                if chave not in dados_usuario:
+                    dados_usuario[chave] = valor
+
+            if not isinstance(dados_usuario["history"], list):
+                dados_usuario["history"] = []
+
+        logging.info("Dados carregados com sucesso.")
+
+    except Exception:
+        logging.exception("Erro ao carregar os dados.")
+        raise RuntimeError(
+            "O arquivo de dados está corrompido ou inacessível. "
+            "O bot não será iniciado para proteger os dados existentes."
+        )
+
+
+def salvar_dados():
+    caminho_temporario = None
+
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=DATA_DIR,
+            delete=False
+        ) as arquivo:
+
+            json.dump(
+                user_data,
+                arquivo,
+                ensure_ascii=False,
+                indent=4
+            )
+
+            caminho_temporario = arquivo.name
+
+        os.replace(caminho_temporario, ELO_FILE)
+
+        return True
+
+    except Exception:
+        logging.exception("Erro ao salvar os dados.")
+
+        if caminho_temporario and os.path.exists(caminho_temporario):
+            try:
+                os.remove(caminho_temporario)
+            except OSError:
+                pass
+
+        return False
+
+
+def obter_dados_usuario(user_id):
+    user_id = str(user_id)
+
+    if user_id not in user_data:
+        user_data[user_id] = dados_padrao()
+
+    elif isinstance(user_data[user_id], int):
+        elo_antigo = user_data[user_id]
+
+        user_data[user_id] = dados_padrao()
+        user_data[user_id]["elo"] = elo_antigo
+        user_data[user_id]["peak_elo"] = elo_antigo
+
+    return user_data[user_id]
+
+
+# ============================================================
+# 3. ELO E PATENTES
+# ============================================================
 
 PATENTES = [
     (0, 499, "Iniciante"),
     (500, 999, "Amador"),
-    (1000, 1499, "Intermediario"),
+    (1000, 1499, "Intermediário"),
     (1500, 1999, "Mestre"),
-    (2000, 2999, "Grão Mestre"),
-    (3000, 99999, "Lenda do Xadrez")
+    (2000, 2999, "Grão-Mestre"),
+    (3000, 49999, "Lenda do Xadrez"),
+    (50000, float("inf"), "Deus do Xadrez")
 ]
 
-def obter_patente(elo: int):
-    for min_elo, max_elo, nome in PATENTES:
-        if min_elo <= elo <= max_elo:
+
+def obter_patente(elo):
+    for minimo, maximo, nome in PATENTES:
+        if minimo <= elo <= maximo:
             return nome
+
     return "Iniciante"
 
-async def atualizar_cargo_elo(member: discord.Member, novo_elo: int, canal=None):
-    if not member:
-        return
-    
-    nome_cargo_correto = obter_patente(novo_elo)
-    guild = member.guild
-    nomes_todas_patentes = [p[2] for p in PATENTES]
-    
-    cargo_antigo = None
-    for r in member.roles:
-        if r.name in nomes_todas_patentes:
-            cargo_antigo = r.name
-            break
 
-    cargos_para_remover = [role for role in member.roles if role.name in nomes_todas_patentes and role.name != nome_cargo_correto]
-    if cargos_para_remover:
-        try:
-            await member.remove_roles(*cargos_para_remover)
-        except Exception:
-            pass
-        
-    cargo_novo = discord.utils.get(guild.roles, name=nome_cargo_correto)
-    if not cargo_novo:
-        try:
-            cargo_novo = await guild.create_role(name=nome_cargo_correto, reason="Cargo de Patente do Dischess")
-        except Exception:
-            return
-            
-    if cargo_novo not in member.roles:
-        try:
-            await member.add_roles(cargo_novo)
-            if cargo_antigo and cargo_antigo != nome_cargo_correto and canal:
-                idx_antigo = nomes_todas_patentes.index(cargo_antigo) if cargo_antigo in nomes_todas_patentes else -1
-                idx_novo = nomes_todas_patentes.index(nome_cargo_correto)
-                if idx_novo > idx_antigo:
-                    await canal.send(f"🎉 **RANK UP!** {member.mention} subiu de patente e agora é **{nome_cargo_correto}**! 👑")
-        except Exception:
-            pass
-
-def desenhar_tabuleiro(board: chess.Board):
-    pecas_unicode = {
-        'R': '♖', 'N': '♘', 'B': '♗', 'Q': '♕', 'K': '♔', 'P': '♙',
-        'r': '♜', 'n': '♞', 'b': '♝', 'q': '♛', 'k': '♚', 'p': '♟',
-        '.': '·'
-    }
-    
-    linhas = []
-    linhas.append("  a b c d e f g h")
-    linhas.append(" ╔═══════════════╗")
-    
-    fen_board = board.fen().split()[0]
-    ranks = fen_board.split('/')
-    
-    for i, rank in enumerate(ranks):
-        row_str = f"{8 - i}║"
-        elements = []
-        for char in rank:
-            if char.isdigit():
-                for _ in range(int(char)):
-                    elements.append("·")
-            else:
-                elements.append(pecas_unicode.get(char, char))
-        row_str += " ".join(elements) + f"║{8 - i}"
-        linhas.append(row_str)
-        
-    linhas.append(" ╚═══════════════╝")
-    linhas.append("  a b c d e f g h")
-    return "```\n" + "\n".join(linhas) + "\n```"
-
-# --- CONSULTA AO MOTOR STOCKFISH (NUVEM LICHESS API) ---
-def consultar_stockfish(fen):
-    try:
-        url = f"https://lichess.org/api/cloud-eval?fen={urllib.parse.quote(fen)}"
-        req = urllib.request.Request(url, headers={'User-Agent': 'DischessBot/1.0'})
-        with urllib.request.urlopen(req, timeout=3) as response:
-            data = json.loads(response.read().decode())
-            pvs = data.get("pvs", [])
-            if pvs:
-                best_move = pvs[0].get("moves", "").split()[0] if pvs[0].get("moves") else None
-                cp = pvs[0].get("cp")
-                mate = pvs[0].get("mate")
-                return {"best_move": best_move, "cp": cp, "mate": mate}
-    except Exception:
-        pass
-    return None
-
-def classificar_lance_stockfish(board_antes: chess.Board, move: chess.Move):
-    fen_antes = board_antes.fen()
-    eval_stockfish = consultar_stockfish(fen_antes)
-
-    board_depois = board_antes.copy()
-    is_capture = board_antes.is_capture(move)
-    board_depois.push(move)
-
-    if board_depois.is_checkmate():
-        return "💎 Brilhante!!", "Lance de Mestre que levou ao Xeque-Mate!"
-
-    if eval_stockfish:
-        best = eval_stockfish.get("best_move")
-        if best and move.uci() == best:
-            if is_capture and board_antes.piece_at(move.from_square).piece_type in (chess.BISHOP, chess.KNIGHT, chess.ROOK, chess.QUEEN):
-                return "💎 Brilhante!!", f"Lance recomendado pelo Stockfish (`{best}`): Sacrifício tático perfeito!"
-            return "🟢 Melhor Lance (Stockfish)", f"A jogada feita (`{move.uci()}`) foi exatamente a recomendação nº 1 do Stockfish!"
-
-    if board_depois.is_check():
-        return "🟢 Ótimo Lance", "Xeque preciso mantendo pressão no Rei adversário."
-
-    turn = board_antes.turn
-    piece_moved = board_antes.piece_at(move.from_square)
-    atritado = board_depois.attackers(not turn, move.to_square)
-    defendido = board_depois.attackers(turn, move.to_square)
-    val_peca = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}.get(piece_moved.piece_type if piece_moved else 1, 1)
-
-    if atritado and not defendido and val_peca >= 3 and not is_capture:
-        return "🔴 Erro Grave (Blunder)", f"Deixou a peça na casa `{chess.square_name(move.to_square)}` pendurada sem proteção!"
-
-    return "📘 Lance Bom", "Desenvolvimento de jogo consistente."
-
-def registrar_historico_partida(white_user, black_user, vencedor_id, eh_empate, motivo, lances_uci):
-    w_data = get_user_data(white_user.id)
-    b_data = get_user_data(black_user.id)
-
-    id_partida_w = len(w_data["match_history"]) + 1
-    id_partida_b = len(b_data["match_history"]) + 1
-
-    if eh_empate:
-        res_w, res_b = "Empate", "Empate"
-        w_data["draws"] += 1
-        b_data["draws"] += 1
-    elif vencedor_id == white_user.id:
-        res_w, res_b = "Vitória", "Derrota"
-        w_data["wins"] += 1
-        b_data["losses"] += 1
-    else:
-        res_w, res_b = "Derrota", "Vitória"
-        w_data["losses"] += 1
-        b_data["wins"] += 1
-
-    match_info_w = {
-        "id": id_partida_w,
-        "oponente": black_user.name,
-        "oponente_id": black_user.id,
-        "resultado": res_w,
-        "motivo": motivo,
-        "cor": "Brancas",
-        "lances": lances_uci
-    }
-
-    match_info_b = {
-        "id": id_partida_b,
-        "oponente": white_user.name,
-        "oponente_id": white_user.id,
-        "resultado": res_b,
-        "motivo": motivo,
-        "cor": "Pretas",
-        "lances": lances_uci
-    }
-
-    w_data["match_history"].append(match_info_w)
-    b_data["match_history"].append(match_info_b)
-    save_elo()
-
-def jogador_em_jogo_ou_desafio(user_id):
-    for g in active_games.values():
-        if user_id in (g["white"].id, g["black"].id):
-            return True, "em uma partida ativa"
-    for c in pending_challenges.values():
-        if user_id in (c["challenger"].id, c["opponent"].id):
-            return True, "em um desafio pendente"
-    return False, ""
-
-# --- NAVEGADOR DE ANÁLISE COM STOCKFISH ---
-
-class MatchAnalysisView(View):
-    def __init__(self, match_data, user_name):
-        super().__init__(timeout=None)
-        self.match_data = match_data
-        self.user_name = user_name
-        self.lances = match_data.get("lances", [])
-        self.index = 0
-        
-        self.historico_estados = []
-        board_temp = chess.Board()
-        
-        self.historico_estados.append({
-            "board": board_temp.copy(),
-            "move_txt": "Início do jogo",
-            "nota": "🏁 Posição Inicial",
-            "explicacao": "As peças foram dispostas nas posições padrão."
-        })
-
-        for move_str in self.lances:
-            try:
-                m = chess.Move.from_uci(move_str)
-                nota, explicacao = classificar_lance_stockfish(board_temp, m)
-                jogada_txt = f"{'Brancas' if board_temp.turn == chess.WHITE else 'Pretas'}: `{m.uci()}`"
-                
-                board_temp.push(m)
-                self.historico_estados.append({
-                    "board": board_temp.copy(),
-                    "move_txt": jogada_txt,
-                    "nota": nota,
-                    "explicacao": explicacao
-                })
-            except Exception:
-                pass
-
-    def gerar_embed(self):
-        estado = self.historico_estados[self.index]
-        board = estado["board"]
-        tabuleiro_txt = desenhar_tabuleiro(board)
-
-        embed = discord.Embed(
-            title=f"🦈 Análise Stockfish — Partida {self.match_data['id']}",
-            description=f"**Jogador:** `{self.user_name}` | **Oponente:** `{self.match_data['oponente']}`\n**Resultado:** `{self.match_data['resultado']}` *({self.match_data['motivo']})*",
-            color=discord.Color.gold()
-        )
-
-        embed.add_field(name="📍 Lance Atual", value=f"**{self.index} / {len(self.historico_estados)-1}** — {estado['move_txt']}", inline=False)
-        embed.add_field(name="🧠 Análise do Motor", value=f"**{estado['nota']}**\n*{estado['explicacao']}*", inline=False)
-        embed.add_field(name="♟️ Tabuleiro", value=tabuleiro_txt, inline=False)
-
-        return embed
-
-    @discord.ui.button(label="⏮️ Início", style=discord.ButtonStyle.secondary)
-    async def inicio(self, interaction: discord.Interaction, button: Button):
-        self.index = 0
-        await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
-
-    @discord.ui.button(label="◀️ Voltar", style=discord.ButtonStyle.primary)
-    async def voltar(self, interaction: discord.Interaction, button: Button):
-        if self.index > 0:
-            self.index -= 1
-        await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
-
-    @discord.ui.button(label="Avançar ▶️", style=discord.ButtonStyle.primary)
-    async def avancar(self, interaction: discord.Interaction, button: Button):
-        if self.index < len(self.historico_estados) - 1:
-            self.index += 1
-        await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
-
-    @discord.ui.button(label="⏭️ Fim", style=discord.ButtonStyle.secondary)
-    async def fim(self, interaction: discord.Interaction, button: Button):
-        self.index = len(self.historico_estados) - 1
-        await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
-
-# --- PAINEL DE DESAFIO ---
-
-class ChallengeView(View):
-    def __init__(self, channel_id, challenger, opponent):
-        super().__init__(timeout=None)
-        self.channel_id = channel_id
-        self.challenger = challenger
-        self.opponent = opponent
-
-    @discord.ui.button(label="Aceitar Desafio", style=discord.ButtonStyle.success, emoji="⚔️")
-    async def aceitar(self, interaction: discord.Interaction, button_obj: Button):
-        if interaction.user.id != self.opponent.id:
-            await interaction.response.send_message("❌ Apenas o jogador desafiado pode aceitar este convite!", ephemeral=True)
-            return
-
-        if self.channel_id not in pending_challenges:
-            await interaction.response.send_message("❌ Este convite já expirou ou foi cancelado.", ephemeral=True)
-            return
-
-        del pending_challenges[self.channel_id]
-
-        active_games[self.channel_id] = {
-            "board": chess.Board(),
-            "white": self.challenger,
-            "black": self.opponent,
-            "draw_offered_by": None,
-            "selected_square": None,
-            "history_moves": []
-        }
-
-        board = active_games[self.channel_id]["board"]
-        tabuleiro_txt = desenhar_tabuleiro(board)
-        view = ChessBoardView(self.channel_id)
-
-        u1_data = get_user_data(self.challenger.id)
-        u2_data = get_user_data(self.opponent.id)
-
-        embed = discord.Embed(
-            title="⚔️ Partida de Xadrez Iniciada!",
-            description=f"**Brancas:** {self.challenger.mention} ({u1_data['elo']} ELO)\n**Pretas:** {self.opponent.mention} ({u2_data['elo']} ELO)\n\n**Vez de:** {self.challenger.mention} (Brancas)\n{tabuleiro_txt}\nClique na peça que deseja mover:",
-            color=discord.Color.blue()
-        )
-        await interaction.response.edit_message(content=None, embed=embed, view=view)
-
-    @discord.ui.button(label="Cancelar / Recusar", style=discord.ButtonStyle.danger, emoji="❌")
-    async def cancelar(self, interaction: discord.Interaction, button_obj: Button):
-        if interaction.user.id not in (self.challenger.id, self.opponent.id):
-            await interaction.response.send_message("❌ Não podes intervir neste desafio!", ephemeral=True)
-            return
-
-        if self.channel_id in pending_challenges:
-            del pending_challenges[self.channel_id]
-
-        msg = f"❌ O desafio de xadrez foi cancelado por {interaction.user.mention}."
-        await interaction.response.edit_message(content=msg, embed=None, view=None)
-
-# --- SISTEMA DE BOTÕES DE PEÇAS E MOVIMENTOS ---
-
-class ChessBoardView(View):
-    def __init__(self, channel_id):
-        super().__init__(timeout=None)
-        self.channel_id = channel_id
-        self.montar_botoes()
-
-    def montar_botoes(self):
-        self.clear_items()
-        if self.channel_id not in active_games:
-            return
-
-        game = active_games[self.channel_id]
-        board = game["board"]
-        selected_sq = game.get("selected_square")
-
-        pecas_unicode = {
-            'R': '♖', 'N': '♘', 'B': '♗', 'Q': '♕', 'K': '♔', 'P': '♙',
-            'r': '♜', 'n': '♞', 'b': '♝', 'q': '♛', 'k': '♚', 'p': '♟'
-        }
-
-        if selected_sq is None:
-            movimentos_possiveis = list(board.legal_moves)
-            casas_com_origem = set(m.from_square for m in movimentos_possiveis)
-
-            for sq in sorted(casas_com_origem):
-                piece = board.piece_at(sq)
-                if piece:
-                    nome_casa = chess.square_name(sq)
-                    simbolo = pecas_unicode.get(piece.symbol(), "")
-                    label = f"{simbolo} {nome_casa}"
-                    
-                    btn = Button(label=label, style=discord.ButtonStyle.primary, custom_id=f"select_{nome_casa}")
-                    btn.callback = self.criar_callback_selecao(sq)
-                    self.add_item(btn)
-        else:
-            origem_nome = chess.square_name(selected_sq)
-            destinos = [m.to_square for m in board.legal_moves if m.from_square == selected_sq]
-
-            for dest_sq in destinos:
-                dest_nome = chess.square_name(dest_sq)
-                target_piece = board.piece_at(dest_sq)
-                simbolo = f"⚔️ {dest_nome}" if target_piece else dest_nome
-
-                btn = Button(label=simbolo, style=discord.ButtonStyle.success, custom_id=f"dest_{dest_nome}")
-                btn.callback = self.criar_callback_movimento(selected_sq, dest_sq)
-                self.add_item(btn)
-
-            btn_cancel = Button(label="↩️ Voltar", style=discord.ButtonStyle.secondary, custom_id="cancel")
-            btn_cancel.callback = self.callback_cancelar
-            self.add_item(btn_cancel)
-
-        btn_empate = Button(label="Empate", style=discord.ButtonStyle.secondary, emoji="🤝", row=4)
-        btn_empate.callback = self.callback_empate
-        self.add_item(btn_empate)
-
-        btn_desistir = Button(label="Desistir", style=discord.ButtonStyle.danger, emoji="🏳️", row=4)
-        btn_desistir.callback = self.callback_desistir
-        self.add_item(btn_desistir)
-
-    def criar_callback_selecao(self, square):
-        async def callback(interaction: discord.Interaction):
-            game = active_games.get(self.channel_id)
-            if not game:
-                await interaction.response.send_message("Partida não encontrada.", ephemeral=True)
-                return
-
-            vez_atual = game["white"] if game["board"].turn == chess.WHITE else game["black"]
-            if interaction.user != vez_atual:
-                await interaction.response.send_message("Não é a sua vez de jogar!", ephemeral=True)
-                return
-
-            game["selected_square"] = square
-            self.montar_botoes()
-            
-            nome_casa = chess.square_name(square)
-            proxima_vez = game["white"] if game["board"].turn == chess.WHITE else game["black"]
-            tabuleiro_txt = desenhar_tabuleiro(game["board"])
-
-            embed = discord.Embed(
-                title="♟️ Partida em Andamento",
-                description=f"**Peça selecionada:** `{nome_casa}`\nEscolha para onde deseja mover!\n\n**Vez de:** {proxima_vez.mention}\n{tabuleiro_txt}",
-                color=discord.Color.gold()
-            )
-            await interaction.response.edit_message(embed=embed, view=self)
-        return callback
-
-    def criar_callback_movimento(self, from_sq, to_sq):
-        async def callback(interaction: discord.Interaction):
-            game = active_games.get(self.channel_id)
-            if not game:
-                await interaction.response.send_message("Partida não encontrada.", ephemeral=True)
-                return
-
-            vez_atual = game["white"] if game["board"].turn == chess.WHITE else game["black"]
-            if interaction.user != vez_atual:
-                await interaction.response.send_message("Não é a sua vez de jogar!", ephemeral=True)
-                return
-
-            board = game["board"]
-            move = chess.Move(from_sq, to_sq)
-            
-            if board.piece_at(from_sq) and board.piece_at(from_sq).piece_type == chess.PAWN:
-                if chess.square_rank(to_sq) in (0, 7):
-                    move = chess.Move(from_sq, to_sq, promotion=chess.QUEEN)
-
-            board.push(move)
-            game["history_moves"].append(move.uci())
-            game["selected_square"] = None
-            game["draw_offered_by"] = None
-
-            if board.is_game_over():
-                result = board.result()
-                white, black = game["white"], game["black"]
-                w_data = get_user_data(white.id)
-                b_data = get_user_data(black.id)
-                w_elo, b_elo = w_data["elo"], b_data["elo"]
-                k = 32
-
-                if result == "1-0":
-                    w_elo += int(k * (1 - 1/(1 + 10**((b_elo - w_elo)/400))))
-                    b_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
-                    msg_fim = f"🏆 **Fim de Jogo!** As Brancas ({white.mention}) venceram por xeque-mate!"
-                    registrar_historico_partida(white, black, white.id, False, "Xeque-Mate", game["history_moves"])
-                elif result == "0-1":
-                    w_elo += int(k * (0 - 1/(1 + 10**((b_elo - w_elo)/400))))
-                    b_elo += int(k * (1 - 1/(1 + 10**((w_elo - b_elo)/400))))
-                    msg_fim = f"🏆 **Fim de Jogo!** As Pretas ({black.mention}) venceram por xeque-mate!"
-                    registrar_historico_partida(white, black, black.id, False, "Xeque-Mate", game["history_moves"])
-                else:
-                    msg_fim = "🤝 **Fim de Jogo!** A partida terminou em empate."
-                    registrar_historico_partida(white, black, None, True, "Empate", game["history_moves"])
-
-                w_data["elo"] = max(0, w_elo)
-                b_data["elo"] = max(0, b_elo)
-                w_data["peak_elo"] = max(w_data["peak_elo"], w_data["elo"])
-                b_data["peak_elo"] = max(b_data["peak_elo"], b_data["elo"])
-                save_elo()
-
-                if interaction.guild:
-                    await atualizar_cargo_elo(white, w_data["elo"], interaction.channel)
-                    await atualizar_cargo_elo(black, b_data["elo"], interaction.channel)
-
-                del active_games[self.channel_id]
-                tabuleiro_txt = desenhar_tabuleiro(board)
-                await interaction.response.edit_message(content=f"{msg_fim}\n{tabuleiro_txt}\nNovos ELOs:\n{white.name}: `{w_data['elo']}`\n{black.name}: `{b_data['elo']}`", embed=None, view=None)
-                return
-
-            self.montar_botoes()
-            proxima_vez = game["white"] if board.turn == chess.WHITE else game["black"]
-            tabuleiro_txt = desenhar_tabuleiro(game["board"])
-
-            embed = discord.Embed(
-                title="♟️ Partida em Andamento",
-                description=f"Movimento efetuado: `{chess.square_name(from_sq)}{chess.square_name(to_sq)}`\n**Vez de:** {proxima_vez.mention}\n{tabuleiro_txt}",
-                color=discord.Color.green()
-            )
-            await interaction.response.edit_message(embed=embed, view=self)
-        return callback
-
-    async def callback_cancelar(self, interaction: discord.Interaction):
-        game = active_games.get(self.channel_id)
-        if not game:
-            return
-        
-        vez_atual = game["white"] if game["board"].turn == chess.WHITE else game["black"]
-        if interaction.user != vez_atual:
-            await interaction.response.send_message("Não é a sua vez!", ephemeral=True)
-            return
-
-        game["selected_square"] = None
-        self.montar_botoes()
-        tabuleiro_txt = desenhar_tabuleiro(game["board"])
-
-        embed = discord.Embed(
-            title="♟️ Partida em Andamento",
-            description=f"Seleção cancelada.\n**Vez de:** {vez_atual.mention}\n{tabuleiro_txt}",
-            color=discord.Color.green()
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    async def callback_empate(self, interaction: discord.Interaction):
-        game = active_games.get(self.channel_id)
-        if not game or interaction.user not in (game["white"], game["black"]):
-            await interaction.response.send_message("Não estás nesta partida!", ephemeral=True)
-            return
-
-        if game.get("draw_offered_by") is None:
-            game["draw_offered_by"] = interaction.user
-            await interaction.response.send_message(f"🤝 {interaction.user.mention} propôs um empate! O oponente pode clicar no botão para aceitar.", ephemeral=False)
-        elif game["draw_offered_by"] == interaction.user:
-            await interaction.response.send_message("Já propuseste um empate. Aguarda o oponente!", ephemeral=True)
-        else:
-            white, black = game["white"], game["black"]
-            registrar_historico_partida(white, black, None, True, "Acordo de Empate", game["history_moves"])
-            save_elo()
-            del active_games[self.channel_id]
-            await interaction.response.edit_message(content=f"🤝 **Empate Aceito!** A partida entre {white.mention} e {black.mention} terminou em empate.", embed=None, view=None)
-
-    async def callback_desistir(self, interaction: discord.Interaction):
-        game = active_games.get(self.channel_id)
-        if not game or interaction.user not in (game["white"], game["black"]):
-            await interaction.response.send_message("Não estás nesta partida!", ephemeral=True)
-            return
-
-        white, black = game["white"], game["black"]
-        vencedor = black if interaction.user == white else white
-        perdedor = interaction.user
-
-        w_data = get_user_data(white.id)
-        b_data = get_user_data(black.id)
-        w_elo, b_elo = w_data["elo"], b_data["elo"]
-        k = 32
-
-        if vencedor == white:
-            w_elo += int(k * (1 - 1/(1 + 10**((b_elo - w_elo)/400))))
-            b_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
-        else:
-            w_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
-            b_elo += int(k * (1 - 1/(1 + 10**((w_elo - b_elo)/400))))
-
-        w_data["elo"] = max(0, w_elo)
-        b_data["elo"] = max(0, b_elo)
-        w_data["peak_elo"] = max(w_data["peak_elo"], w_data["elo"])
-        b_data["peak_elo"] = max(b_data["peak_elo"], b_data["elo"])
-
-        registrar_historico_partida(white, black, vencedor.id, False, "Desistência", game["history_moves"])
-        save_elo()
-
-        if interaction.guild:
-            await atualizar_cargo_elo(white, w_data["elo"], interaction.channel)
-            await atualizar_cargo_elo(black, b_data["elo"], interaction.channel)
-
-        del active_games[self.channel_id]
-        await interaction.response.edit_message(content=f"🏳️ {perdedor.mention} desistiu da partida!\n🏆 **Vencedor:** {vencedor.mention}\n\nNovos ELOs:\n{white.name}: `{w_data['elo']}`\n{black.name}: `{b_data['elo']}`", embed=None, view=None)
-
-# --- COMANDOS DO BOT ---
-
-@bot.event
-async def on_ready():
-    load_elo()
-    print(f"Dischess Hub ligado como {bot.user}!")
-    try:
-        synced = await bot.tree.sync()
-        print(f"Sincronizados {len(synced)} comandos de barra (/ ).")
-    except Exception as e:
-        print(e)
-
-@bot.tree.command(name="desafiar", description="Desafia outro membro para uma partida de xadrez.")
-async def desafiar(interaction: discord.Interaction, oponente: discord.Member):
-    if oponente == interaction.user:
-        await interaction.response.send_message("❌ Não podes jogar contra ti próprio!", ephemeral=True)
-        return
-    if oponente.bot:
-        await interaction.response.send_message("❌ Não podes jogar contra bots do Discord!", ephemeral=True)
-        return
-
-    channel_id = interaction.channel.id
-
-    if channel_id in active_games or channel_id in pending_challenges:
-        await interaction.response.send_message("❌ Já existe uma partida ou desafio em andamento neste canal!", ephemeral=True)
-        return
-
-    em_jogo, motivo = jogador_em_jogo_ou_desafio(interaction.user.id)
-    if em_jogo:
-        await interaction.response.send_message(f"❌ Tu já estás {motivo}! Termina o desafio/partida antes de criar um novo.", ephemeral=True)
-        return
-
-    em_jogo_op, motivo_op = jogador_em_jogo_ou_desafio(oponente.id)
-    if em_jogo_op:
-        await interaction.response.send_message(f"❌ {oponente.mention} já está {motivo_op} e não pode aceitar novos desafios no momento.", ephemeral=True)
-        return
-
-    pending_challenges[channel_id] = {
-        "challenger": interaction.user,
-        "opponent": oponente
-    }
-
-    view = ChallengeView(channel_id, interaction.user, oponente)
-    embed = discord.Embed(
-        title="⚔️ Desafio de Xadrez!",
-        description=f"{interaction.user.mention} desafiou {oponente.mention} para uma partida de xadrez!\n\n{oponente.mention}, clica em **Aceitar Desafio** para começar a jogar.",
-        color=discord.Color.gold()
+def calcular_delta_elo(
+    elo_brancas,
+    elo_pretas,
+    resultado_brancas
+):
+    expectativa_brancas = 1 / (
+        1 + 10 ** ((elo_pretas - elo_brancas) / 400)
     )
-    await interaction.response.send_message(embed=embed, view=view)
 
-@bot.tree.command(name="historico", description="Lista o histórico de partidas do jogador.")
-async def historico(interaction: discord.Interaction, membro: discord.Member = None):
-    target = membro or interaction.user
-    data = get_user_data(target.id)
-    partidas = data.get("match_history", [])
+    expectativa_pretas = 1 - expectativa_brancas
 
-    if not partidas:
-        await interaction.response.send_message(f"📜 **{target.name}** ainda não jogou nenhuma partida registrada.", ephemeral=True)
-        return
+    resultado_pretas = 1 - resultado_brancas
 
-    linhas = []
-    for p in partidas[-10:]:
-        emoji_res = "🟢" if p["resultado"] == "Vitória" else ("🔴" if p["resultado"] == "Derrota" else "🟡")
-        linhas.append(f"{emoji_res} **Partida {p['id']}**: {p['resultado']} vs `{p['oponente']}` *(Motivo: {p['motivo']})*")
+    delta_brancas = round(
+        K_FACTOR * (resultado_brancas - expectativa_brancas)
+    )
+
+    delta_pretas = round(
+        K_FACTOR * (resultado_pretas - expectativa_pretas)
+    )
+
+    return delta_brancas, delta_pretas
+
+
+def atualizar_elo(user_id, delta):
+    dados = obter_dados_usuario(user_id)
+
+    dados["elo"] = max(0, dados["elo"] + delta)
+
+    dados["peak_elo"] = max(
+        dados["peak_elo"],
+        dados["elo"]
+    )
+
+
+# ============================================================
+# 4. JOGADORES OCUPADOS E LOCKS
+# ============================================================
+
+def jogador_em_jogo(user_id):
+    return any(
+        user_id in (game["white"], game["black"])
+        for game in active_games.values()
+    )
+
+
+def jogador_em_desafio(user_id):
+    return any(
+        user_id in (
+            challenge["challenger"],
+            challenge["opponent"]
+        )
+        for challenge in pending_challenges.values()
+    )
+
+
+def jogador_ocupado(user_id):
+    return (
+        jogador_em_jogo(user_id)
+        or jogador_em_desafio(user_id)
+    )
+
+
+def obter_lock(channel_id):
+    if channel_id not in game_locks:
+        game_locks[channel_id] = asyncio.Lock()
+
+    return game_locks[channel_id]
+
+
+# ============================================================
+# 5. TABULEIRO E PARTIDAS
+# ============================================================
+
+def desenhar_tabuleiro(board):
+    tabuleiro = board.unicode(
+        borders=True,
+        empty_square="·",
+        orientation=chess.WHITE
+    )
+
+    return f"```{tabuleiro}```"
+
+
+def criar_embed_partida(game):
+    board = game["board"]
 
     embed = discord.Embed(
-        title=f"📜 Histórico de Partidas — {target.name}",
-        description="\n".join(linhas),
-        color=discord.Color.blue()
+        title="♟️ DISCHESS — Partida em andamento",
+        description=desenhar_tabuleiro(board),
+        color=discord.Color.blurple()
     )
-    embed.set_footer(text="Use /analisar <número> para ver a análise do Stockfish!")
-    await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="analisar", description="Navegue e veja a análise real do Stockfish lance por lance!")
-async def analisar(interaction: discord.Interaction, id_partida: int, membro: discord.Member = None):
-    target = membro or interaction.user
-    data = get_user_data(target.id)
-    partidas = data.get("match_history", [])
+    brancas = bot.get_user(game["white"])
+    pretas = bot.get_user(game["black"])
 
-    match = next((p for p in partidas if p["id"] == id_partida), None)
-    if not match:
-        await interaction.response.send_message(f"❌ Partida ID `{id_partida}` não encontrada no histórico de **{target.name}**.", ephemeral=True)
-        return
-
-    await interaction.response.defer()
-
-    view = MatchAnalysisView(match, target.name)
-    embed = view.gerar_embed()
-
-    await interaction.followup.send(embed=embed, view=view)
-
-@bot.tree.command(name="perfil", description="Exibe a Carteirinha de Enxadrista (a tua ou de outro membro).")
-async def perfil(interaction: discord.Interaction, membro: discord.Member = None):
-    target = membro or interaction.user
-    data = get_user_data(target.id)
-
-    elo_atual = data["elo"]
-    peak_elo = data["peak_elo"]
-    wins = data["wins"]
-    losses = data["losses"]
-    draws = data["draws"]
-    total_jogos = wins + losses + draws
-
-    win_rate = (wins / total_jogos * 100) if total_jogos > 0 else 0.0
-    patente_atual = obter_patente(elo_atual)
-
-    proxima_patente_nome = "Lenda Máxima"
-    min_p, max_p = 0, 3000
-    for min_elo, max_elo, nome in PATENTES:
-        if min_elo <= elo_atual <= max_elo:
-            min_p, max_p = min_elo, max_elo
-            idx = PATENTES.index((min_elo, max_elo, nome))
-            if idx + 1 < len(PATENTES):
-                proxima_patente_nome = PATENTES[idx + 1][2]
-                max_p = PATENTES[idx + 1][0]
-            break
-
-    intervalo = max_p - min_p
-    progresso_pct = min(1.0, max(0.0, (elo_atual - min_p) / intervalo)) if intervalo > 0 else 1.0
-    blocos = int(progresso_pct * 10)
-    barra = "▰" * blocos + "▱" * (10 - blocos)
-
-    embed = discord.Embed(
-        title=f"📜 Carteirinha de Enxadrista — {target.name}",
-        color=discord.Color.gold()
+    nome_brancas = (
+        brancas.name if brancas else str(game["white"])
     )
-    embed.set_thumbnail(url=target.display_avatar.url)
 
-    embed.add_field(name="🏆 ELO Atual", value=f"`{elo_atual}`", inline=True)
-    embed.add_field(name="📈 Maior ELO (Peak)", value=f"`{peak_elo}`", inline=True)
-    embed.add_field(name="👑 Patente", value=f"`{patente_atual}`", inline=True)
-
-    embed.add_field(name="⚔️ Partidas Jogadas", value=f"`{total_jogos}`", inline=True)
-    embed.add_field(name="🎯 Win Rate", value=f"`{win_rate:.1f}%`", inline=True)
-    embed.add_field(name="📊 V / D / E", value=f"`{wins}W` / `{losses}L` / `{draws}D`", inline=True)
+    nome_pretas = (
+        pretas.name if pretas else str(game["black"])
+    )
 
     embed.add_field(
-        name=f"🚀 Progresso para {proxima_patente_nome}",
-        value=f"{barra} `{int(progresso_pct*100)}%` ({elo_atual}/{max_p} ELO)",
+        name="⚪ Brancas",
+        value=nome_brancas,
+        inline=True
+    )
+
+    embed.add_field(
+        name="⚫ Pretas",
+        value=nome_pretas,
+        inline=True
+    )
+
+    turno = (
+        "Brancas"
+        if board.turn == chess.WHITE
+        else "Pretas"
+    )
+
+    embed.add_field(
+        name="Vez de jogar",
+        value=turno,
         inline=False
     )
 
-    await interaction.response.send_message(embed=embed)
+    if game.get("draw_offer") is not None:
+        ofertante = bot.get_user(game["draw_offer"])
 
-@bot.tree.command(name="ranking", description="Mostra o ranking global do servidor.")
-async def ranking(interaction: discord.Interaction):
-    guild = interaction.guild
-    ranking_data = dict(user_elo)
-    
-    if not ranking_data and guild:
-        for member in guild.members:
-            if not member.bot:
-                ranking_data[str(member.id)] = {"elo": 100}
+        nome_ofertante = (
+            ofertante.name
+            if ofertante
+            else str(game["draw_offer"])
+        )
 
-    if not ranking_data:
-        await interaction.response.send_message("📊 Ainda não há registos de ELO no ranking.", ephemeral=True)
-        return
+        embed.add_field(
+            name="🤝 Oferta de empate pendente",
+            value=(
+                f"{nome_ofertante} ofereceu empate. "
+                "O adversário pode aceitar ou recusar."
+            ),
+            inline=False
+        )
 
-    sorted_users = sorted(
-        ranking_data.items(),
-        key=lambda item: item[1]["elo"] if isinstance(item[1], dict) else item[1],
-        reverse=True
+    embed.set_footer(
+        text=f"Partida {game['id']} • DISCHESS"
     )
-    
-    medals = ["🥇", "🥈", "🥉"]
-    description = ""
-    
-    for index, (uid, udata) in enumerate(sorted_users[:10], start=1):
-        elo_val = udata["elo"] if isinstance(udata, dict) else udata
-        
-        user_obj = guild.get_member(int(uid)) if guild else None
-        mention = user_obj.mention if user_obj else f"<@{uid}>"
-        
-        prefix = medals[index - 1] if index <= 3 else f"**{index}.**"
-        description += f"{prefix} {mention} — **{elo_val} ELO**\n"
 
+    return embed
+
+
+def criar_partida(challenger, opponent, channel_id):
+    game_id = str(uuid.uuid4()).upper()
+
+    return {
+        "id": game_id,
+        "white": challenger,
+        "black": opponent,
+        "channel_id": channel_id,
+        "board": chess.Board(),
+        "moves": [],
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "draw_offer": None,
+        "selected_square": None,
+        "finished": False,
+        "message": None
+    }
+
+
+def jogador_da_vez(game):
+    return (
+        game["white"]
+        if game["board"].turn == chess.WHITE
+        else game["black"]
+    )
+
+
+def jogador_adversario(game, user_id):
+    if user_id == game["white"]:
+        return game["black"]
+
+    return game["white"]
+
+
+def motivo_fim(board):
+    outcome = board.outcome()
+
+    if outcome is None:
+        return None
+
+    if outcome.termination == chess.Termination.CHECKMATE:
+        return "Xeque-mate"
+
+    if outcome.termination == chess.Termination.STALEMATE:
+        return "Afogamento"
+
+    if outcome.termination == chess.Termination.INSUFFICIENT_MATERIAL:
+        return "Material insuficiente"
+
+    if outcome.termination == chess.Termination.SEVENTYFIVE_MOVES:
+        return "Regra dos 75 movimentos"
+
+    if outcome.termination == chess.Termination.FIVEFOLD_REPETITION:
+        return "Repetição quíntupla"
+
+    return "Empate pelas regras do xadrez"
+
+
+# ============================================================
+# 6. HISTÓRICO, PGN E FINALIZAÇÃO
+# ============================================================
+
+def gerar_pgn(game, resultado, motivo):
+    board = chess.Board()
+
+    partida = chess.pgn.Game()
+
+    partida.headers["Event"] = "DISCHESS"
+    partida.headers["Site"] = "Discord"
+    partida.headers["Date"] = datetime.now().strftime("%Y.%m.%d")
+    partida.headers["White"] = str(game["white"])
+    partida.headers["Black"] = str(game["black"])
+    partida.headers["Result"] = resultado
+    partida.headers["Termination"] = motivo
+
+    node = partida
+
+    for uci in game["moves"]:
+        move = chess.Move.from_uci(uci)
+
+        if board.is_legal(move):
+            board.push(move)
+            node = node.add_variation(move)
+
+    saida = io.StringIO()
+
+    print(partida, file=saida, end="")
+
+    return saida.getvalue()
+
+
+def registrar_historico(
+    game,
+    resultado,
+    motivo,
+    elo_brancas_antes,
+    elo_pretas_antes,
+    delta_brancas,
+    delta_pretas
+):
+    elo_brancas_depois = obter_dados_usuario(
+        game["white"]
+    )["elo"]
+
+    elo_pretas_depois = obter_dados_usuario(
+        game["black"]
+    )["elo"]
+
+    pgn = gerar_pgn(game, resultado, motivo)
+
+    registro_base = {
+        "id": game["id"],
+        "date": datetime.now(timezone.utc).isoformat(),
+        "result": resultado,
+        "reason": motivo,
+        "white": game["white"],
+        "black": game["black"],
+        "white_elo_before": elo_brancas_antes,
+        "black_elo_before": elo_pretas_antes,
+        "white_elo_after": elo_brancas_depois,
+        "black_elo_after": elo_pretas_depois,
+        "white_delta": delta_brancas,
+        "black_delta": delta_pretas,
+        "moves": list(game["moves"]),
+        "pgn": pgn
+    }
+
+    for user_id in (game["white"], game["black"]):
+        dados = obter_dados_usuario(user_id)
+
+        registro = dict(registro_base)
+
+        dados["history"].insert(0, registro)
+        dados["history"] = dados["history"][:100]
+
+
+def finalizar_partida(game, resultado, motivo):
+    if game["finished"]:
+        return None
+
+    if active_games.get(game["channel_id"]) is not game:
+        return None
+
+    game["finished"] = True
+
+    white = game["white"]
+    black = game["black"]
+
+    dados_brancas = obter_dados_usuario(white)
+    dados_pretas = obter_dados_usuario(black)
+
+    elo_brancas_antes = dados_brancas["elo"]
+    elo_pretas_antes = dados_pretas["elo"]
+
+    if resultado == "1-0":
+        score = 1.0
+        dados_brancas["wins"] += 1
+        dados_pretas["losses"] += 1
+
+    elif resultado == "0-1":
+        score = 0.0
+        dados_brancas["losses"] += 1
+        dados_pretas["wins"] += 1
+
+    else:
+        score = 0.5
+        dados_brancas["draws"] += 1
+        dados_pretas["draws"] += 1
+
+    delta_brancas, delta_pretas = calcular_delta_elo(
+        elo_brancas_antes,
+        elo_pretas_antes,
+        score
+    )
+
+    atualizar_elo(white, delta_brancas)
+    atualizar_elo(black, delta_pretas)
+
+    registrar_historico(
+        game,
+        resultado,
+        motivo,
+        elo_brancas_antes,
+        elo_pretas_antes,
+        delta_brancas,
+        delta_pretas
+    )
+
+    salvou = salvar_dados()
+
+    if not salvou:
+        logging.error(
+            "A partida %s terminou, mas os dados não foram salvos.",
+            game["id"]
+        )
+
+    active_games.pop(game["channel_id"], None)
+
+    return {
+        "delta_white": delta_brancas,
+        "delta_black": delta_pretas,
+        "white_elo": obter_dados_usuario(white)["elo"],
+        "black_elo": obter_dados_usuario(black)["elo"],
+        "saved": salvou
+    }
+
+
+def criar_embed_final(game, titulo, descricao, resultado_elo):
     embed = discord.Embed(
-        title="🏆 Ranking Global — Dischess Hub",
-        description=description,
+        title=titulo,
+        description=(
+            f"{desenhar_tabuleiro(game['board'])}\n"
+            f"{descricao}"
+        ),
         color=discord.Color.gold()
     )
-    embed.set_footer(text="Jogue partidas com /desafiar para subir no ranking!")
-    await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="resetar_tudo", description="[ADMIN] Reseta todos os ELOs, estatísticas e cargos de patentes.")
-async def resetar_tudo(interaction: discord.Interaction):
-    if interaction.user.id != ADMIN_ID:
-        await interaction.response.send_message("❌ Apenas o dono do bot tem permissão para usar este comando!", ephemeral=True)
+    if resultado_elo:
+        embed.add_field(
+            name="ELO das Brancas",
+            value=(
+                f"{resultado_elo['white_elo']} "
+                f"({resultado_elo['delta_white']:+})"
+            ),
+            inline=True
+        )
+
+        embed.add_field(
+            name="ELO das Pretas",
+            value=(
+                f"{resultado_elo['black_elo']} "
+                f"({resultado_elo['delta_black']:+})"
+            ),
+            inline=True
+        )
+
+        if not resultado_elo["saved"]:
+            embed.add_field(
+                name="⚠️ Aviso",
+                value="Não foi possível salvar os dados no arquivo.",
+                inline=False
+            )
+
+    return embed
+
+
+# ============================================================
+# 7. INTERFACE DO TABULEIRO
+# ============================================================
+
+class ChessBoardView(discord.ui.View):
+
+    def __init__(self, game):
+        super().__init__(timeout=None)
+
+        self.game = game
+        self.page = 0
+
+        self.rebuild()
+
+    def rebuild(self):
+        self.clear_items()
+
+        board = self.game["board"]
+
+        if self.game["finished"]:
+            return
+
+        pecas = []
+
+        for square, piece in board.piece_map().items():
+            if piece.color == board.turn:
+                pecas.append(
+                    discord.SelectOption(
+                        label=(
+                            f"{piece.symbol()} — "
+                            f"{chess.square_name(square)}"
+                        ),
+                        value=str(square)
+                    )
+                )
+
+        if pecas:
+            select = discord.ui.Select(
+                placeholder="Escolha uma peça para mover",
+                options=pecas,
+                row=0
+            )
+
+            select.callback = self.selecionar_peca
+
+            self.add_item(select)
+
+        if self.game["selected_square"] is not None:
+            cancelar = discord.ui.Button(
+                label="Cancelar seleção",
+                style=discord.ButtonStyle.danger,
+                row=0
+            )
+
+            cancelar.callback = self.cancelar_selecao
+
+            self.add_item(cancelar)
+
+            origem = self.game["selected_square"]
+
+            movimentos = [
+                move
+                for move in board.legal_moves
+                if move.from_square == origem
+            ]
+
+            movimentos.sort(
+                key=lambda move: (
+                    chess.square_rank(move.to_square),
+                    chess.square_file(move.to_square)
+                )
+            )
+
+            total_paginas = max(
+                1,
+                (
+                    len(movimentos)
+                    + MOVIMENTOS_POR_PAGINA
+                    - 1
+                ) // MOVIMENTOS_POR_PAGINA
+            )
+
+            self.page = min(
+                self.page,
+                total_paginas - 1
+            )
+
+            inicio = self.page * MOVIMENTOS_POR_PAGINA
+            fim = inicio + MOVIMENTOS_POR_PAGINA
+
+            pagina = movimentos[inicio:fim]
+
+            for indice, move in enumerate(pagina):
+                nome = chess.square_name(move.to_square)
+
+                if move.promotion:
+                    nome += " (promoção)"
+
+                botao = discord.ui.Button(
+                    label=nome,
+                    style=discord.ButtonStyle.primary,
+                    row=1 + indice // 5
+                )
+
+                botao.callback = self.criar_callback_movimento(move)
+
+                self.add_item(botao)
+
+            if total_paginas > 1:
+                anterior = discord.ui.Button(
+                    label="◀",
+                    style=discord.ButtonStyle.secondary,
+                    disabled=self.page <= 0,
+                    row=4
+                )
+
+                proxima = discord.ui.Button(
+                    label="▶",
+                    style=discord.ButtonStyle.secondary,
+                    disabled=self.page >= total_paginas - 1,
+                    row=4
+                )
+
+                anterior.callback = self.pagina_anterior
+                proxima.callback = self.proxima_pagina
+
+                self.add_item(anterior)
+                self.add_item(proxima)
+
+        # ----------------------------------------------------
+        # BOTÕES FIXOS DE EMPATE E DESISTÊNCIA
+        # ----------------------------------------------------
+
+        if self.game["draw_offer"] is None:
+
+            btn_empate = discord.ui.Button(
+                label="Oferecer empate",
+                emoji="🤝",
+                style=discord.ButtonStyle.secondary,
+                row=4
+            )
+
+            btn_empate.callback = self.callback_oferecer_empate
+
+            self.add_item(btn_empate)
+
+        else:
+
+            btn_aceitar = discord.ui.Button(
+                label="Aceitar empate",
+                emoji="✅",
+                style=discord.ButtonStyle.success,
+                row=4
+            )
+
+            btn_recusar = discord.ui.Button(
+                label="Recusar empate",
+                emoji="❌",
+                style=discord.ButtonStyle.danger,
+                row=4
+            )
+
+            btn_aceitar.callback = self.callback_aceitar_empate
+            btn_recusar.callback = self.callback_recusar_empate
+
+            self.add_item(btn_aceitar)
+            self.add_item(btn_recusar)
+
+        btn_desistir = discord.ui.Button(
+            label="Desistir",
+            emoji="🏳️",
+            style=discord.ButtonStyle.danger,
+            row=4
+        )
+
+        btn_desistir.callback = self.callback_desistir_clique
+
+        self.add_item(btn_desistir)
+
+    async def validar_participante(self, interaction):
+        if self.game["finished"]:
+            await interaction.response.send_message(
+                "Essa partida já terminou.",
+                ephemeral=True
+            )
+            return False
+
+        if active_games.get(self.game["channel_id"]) is not self.game:
+            await interaction.response.send_message(
+                "Essa partida não está mais ativa.",
+                ephemeral=True
+            )
+            return False
+
+        if interaction.user.id not in (
+            self.game["white"],
+            self.game["black"]
+        ):
+            await interaction.response.send_message(
+                "Você não participa desta partida.",
+                ephemeral=True
+            )
+            return False
+
+        return True
+
+    async def validar_jogador(self, interaction):
+        if not await self.validar_participante(interaction):
+            return False
+
+        if interaction.user.id != jogador_da_vez(self.game):
+            await interaction.response.send_message(
+                "Não é sua vez de jogar.",
+                ephemeral=True
+            )
+            return False
+
+        return True
+
+    async def selecionar_peca(self, interaction):
+        async with obter_lock(self.game["channel_id"]):
+
+            if not await self.validar_jogador(interaction):
+                return
+
+            valores = interaction.data.get("values", [])
+
+            if not valores:
+                await interaction.response.send_message(
+                    "Nenhuma peça foi selecionada.",
+                    ephemeral=True
+                )
+                return
+
+            square = int(valores[0])
+
+            piece = self.game["board"].piece_at(square)
+
+            if piece is None or piece.color != self.game["board"].turn:
+                await interaction.response.send_message(
+                    "Essa peça não pode ser selecionada.",
+                    ephemeral=True
+                )
+                return
+
+            self.game["selected_square"] = square
+
+            self.page = 0
+
+            self.rebuild()
+
+            await interaction.response.edit_message(
+                embed=criar_embed_partida(self.game),
+                view=self
+            )
+
+    def criar_callback_movimento(self, move):
+
+        async def callback(interaction):
+            async with obter_lock(self.game["channel_id"]):
+
+                if not await self.validar_jogador(interaction):
+                    return
+
+                board = self.game["board"]
+
+                if not board.is_legal(move):
+                    await interaction.response.send_message(
+                        "Esse movimento não é mais válido.",
+                        ephemeral=True
+                    )
+                    return
+
+                if move.promotion:
+
+                    promotion_view = PromotionView(
+                        self.game,
+                        move,
+                        self
+                    )
+
+                    await interaction.response.edit_message(
+                        content="Escolha a peça da promoção:",
+                        embed=criar_embed_partida(self.game),
+                        view=promotion_view
+                    )
+
+                    promotion_view.message = interaction.message
+
+                    return
+
+                # Cancela a oferta somente se quem a ofereceu
+                # estiver realizando o lance.
+                if self.game["draw_offer"] == interaction.user.id:
+                    self.game["draw_offer"] = None
+
+                board.push(move)
+
+                self.game["moves"].append(move.uci())
+
+                self.game["selected_square"] = None
+
+                self.page = 0
+
+                await atualizar_tabuleiro(
+                    interaction,
+                    self.game,
+                    self
+                )
+
+        return callback
+
+    async def pagina_anterior(self, interaction):
+        async with obter_lock(self.game["channel_id"]):
+
+            if not await self.validar_jogador(interaction):
+                return
+
+            self.page = max(0, self.page - 1)
+
+            self.rebuild()
+
+            await interaction.response.edit_message(
+                embed=criar_embed_partida(self.game),
+                view=self
+            )
+
+    async def proxima_pagina(self, interaction):
+        async with obter_lock(self.game["channel_id"]):
+
+            if not await self.validar_jogador(interaction):
+                return
+
+            self.page += 1
+
+            self.rebuild()
+
+            await interaction.response.edit_message(
+                embed=criar_embed_partida(self.game),
+                view=self
+            )
+
+    async def cancelar_selecao(self, interaction):
+        async with obter_lock(self.game["channel_id"]):
+
+            if not await self.validar_jogador(interaction):
+                return
+
+            self.game["selected_square"] = None
+
+            self.page = 0
+
+            self.rebuild()
+
+            await interaction.response.edit_message(
+                embed=criar_embed_partida(self.game),
+                view=self
+            )
+
+    # --------------------------------------------------------
+    # OFERECER EMPATE
+    # --------------------------------------------------------
+
+    async def callback_oferecer_empate(self, interaction):
+        async with obter_lock(self.game["channel_id"]):
+
+            if not await self.validar_participante(interaction):
+                return
+
+            if self.game["draw_offer"] is not None:
+                await interaction.response.send_message(
+                    "Já existe uma oferta de empate pendente.",
+                    ephemeral=True
+                )
+                return
+
+            self.game["draw_offer"] = interaction.user.id
+
+            self.rebuild()
+
+            await interaction.response.edit_message(
+                embed=criar_embed_partida(self.game),
+                view=self
+            )
+
+    # --------------------------------------------------------
+    # ACEITAR EMPATE
+    # --------------------------------------------------------
+
+    async def callback_aceitar_empate(self, interaction):
+        async with obter_lock(self.game["channel_id"]):
+
+            if not await self.validar_participante(interaction):
+                return
+
+            ofertante = self.game["draw_offer"]
+
+            if ofertante is None:
+                await interaction.response.send_message(
+                    "Não existe oferta de empate pendente.",
+                    ephemeral=True
+                )
+                return
+
+            if interaction.user.id == ofertante:
+                await interaction.response.send_message(
+                    "Você não pode aceitar sua própria oferta.",
+                    ephemeral=True
+                )
+                return
+
+            resultado_elo = finalizar_partida(
+                self.game,
+                "1/2-1/2",
+                "Empate acordado"
+            )
+
+            if resultado_elo is None:
+                await interaction.response.send_message(
+                    "Não foi possível finalizar essa partida.",
+                    ephemeral=True
+                )
+                return
+
+            self.game["draw_offer"] = None
+
+            embed = criar_embed_final(
+                self.game,
+                "🤝 DISCHESS — Empate acordado",
+                "**Os jogadores concordaram com o empate!**",
+                resultado_elo
+            )
+
+            await interaction.response.edit_message(
+                content=None,
+                embed=embed,
+                view=None
+            )
+
+    # --------------------------------------------------------
+    # RECUSAR EMPATE
+    # --------------------------------------------------------
+
+    async def callback_recusar_empate(self, interaction):
+        async with obter_lock(self.game["channel_id"]):
+
+            if not await self.validar_participante(interaction):
+                return
+
+            ofertante = self.game["draw_offer"]
+
+            if ofertante is None:
+                await interaction.response.send_message(
+                    "Não existe oferta de empate pendente.",
+                    ephemeral=True
+                )
+                return
+
+            if interaction.user.id == ofertante:
+                await interaction.response.send_message(
+                    "Você não pode recusar sua própria oferta.",
+                    ephemeral=True
+                )
+                return
+
+            self.game["draw_offer"] = None
+
+            self.rebuild()
+
+            await interaction.response.edit_message(
+                embed=criar_embed_partida(self.game),
+                view=self
+            )
+
+    # --------------------------------------------------------
+    # DESISTÊNCIA
+    # --------------------------------------------------------
+
+    async def callback_desistir_clique(self, interaction):
+        async with obter_lock(self.game["channel_id"]):
+
+            if not await self.validar_participante(interaction):
+                return
+
+            confirm_view = ConfirmDesistenciaView(
+                self.game,
+                self
+            )
+
+            await interaction.response.send_message(
+                "⚠️ Tem certeza de que deseja desistir da partida?",
+                view=confirm_view,
+                ephemeral=True
+            )
+
+            confirm_view.message = await interaction.original_response()
+
+
+# ============================================================
+# 8. PROMOÇÃO DE PEÃO
+# ============================================================
+
+class PromotionView(discord.ui.View):
+
+    def __init__(self, game, move, parent_view):
+        super().__init__(timeout=TEMPO_PROMOCAO)
+
+        self.game = game
+        self.move = move
+        self.parent_view = parent_view
+
+        self.message = None
+        self.resolved = False
+
+    async def on_timeout(self):
+        async with obter_lock(self.game["channel_id"]):
+
+            if self.resolved:
+                return
+
+            self.resolved = True
+
+            if self.game["finished"]:
+                return
+
+            if active_games.get(self.game["channel_id"]) is not self.game:
+                return
+
+            self.parent_view.rebuild()
+
+            if self.message:
+                try:
+                    await self.message.edit(
+                        content="⌛ Tempo de promoção esgotado. Escolha a peça novamente.",
+                        embed=criar_embed_partida(self.game),
+                        view=self.parent_view
+                    )
+                except discord.HTTPException:
+                    logging.exception(
+                        "Não foi possível restaurar o tabuleiro após o timeout."
+                    )
+
+    async def promover(self, interaction, piece_type):
+        async with obter_lock(self.game["channel_id"]):
+
+            if self.resolved:
+                await interaction.response.send_message(
+                    "Essa escolha de promoção expirou.",
+                    ephemeral=True
+                )
+                return
+
+            if self.game["finished"]:
+                await interaction.response.send_message(
+                    "Essa partida já terminou.",
+                    ephemeral=True
+                )
+                return
+
+            if active_games.get(self.game["channel_id"]) is not self.game:
+                await interaction.response.send_message(
+                    "Essa partida não está mais ativa.",
+                    ephemeral=True
+                )
+                return
+
+            if interaction.user.id not in (
+                self.game["white"],
+                self.game["black"]
+            ):
+                await interaction.response.send_message(
+                    "Você não participa desta partida.",
+                    ephemeral=True
+                )
+                return
+
+            if interaction.user.id != jogador_da_vez(self.game):
+                await interaction.response.send_message(
+                    "Não é sua vez de jogar.",
+                    ephemeral=True
+                )
+                return
+
+            move_final = chess.Move(
+                self.move.from_square,
+                self.move.to_square,
+                promotion=piece_type
+            )
+
+            board = self.game["board"]
+
+            if not board.is_legal(move_final):
+                await interaction.response.send_message(
+                    "Essa promoção não é mais válida.",
+                    ephemeral=True
+                )
+                return
+
+            if self.game["draw_offer"] == interaction.user.id:
+                self.game["draw_offer"] = None
+
+            board.push(move_final)
+
+            self.game["moves"].append(move_final.uci())
+
+            self.game["selected_square"] = None
+
+            self.resolved = True
+
+            self.parent_view.page = 0
+            self.parent_view.rebuild()
+
+            await atualizar_tabuleiro(
+                interaction,
+                self.game,
+                self.parent_view
+            )
+
+    @discord.ui.button(
+        label="Dama",
+        emoji="♕",
+        style=discord.ButtonStyle.primary
+    )
+    async def dama(self, interaction, button):
+        await self.promover(interaction, chess.QUEEN)
+
+    @discord.ui.button(
+        label="Torre",
+        emoji="♖",
+        style=discord.ButtonStyle.primary
+    )
+    async def torre(self, interaction, button):
+        await self.promover(interaction, chess.ROOK)
+
+    @discord.ui.button(
+        label="Bispo",
+        emoji="♗",
+        style=discord.ButtonStyle.primary
+    )
+    async def bispo(self, interaction, button):
+        await self.promover(interaction, chess.BISHOP)
+
+    @discord.ui.button(
+        label="Cavalo",
+        emoji="♘",
+        style=discord.ButtonStyle.primary
+    )
+    async def cavalo(self, interaction, button):
+        await self.promover(interaction, chess.KNIGHT)
+
+
+# ============================================================
+# 8.1 CONFIRMAÇÃO DE DESISTÊNCIA
+# ============================================================
+
+class ConfirmDesistenciaView(discord.ui.View):
+
+    def __init__(self, game, board_view):
+        super().__init__(timeout=TEMPO_CONFIRMACAO)
+
+        self.game = game
+        self.board_view = board_view
+        self.message = None
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+        if self.message:
+            try:
+                await self.message.edit(
+                    content="⌛ A confirmação de desistência expirou.",
+                    view=self
+                )
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(
+        label="Sim, desistir",
+        style=discord.ButtonStyle.danger
+    )
+    async def confirmar(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        async with obter_lock(self.game["channel_id"]):
+
+            if self.game["finished"]:
+                await interaction.response.send_message(
+                    "Essa partida já terminou.",
+                    ephemeral=True
+                )
+                return
+
+            if active_games.get(self.game["channel_id"]) is not self.game:
+                await interaction.response.send_message(
+                    "Essa partida não está mais ativa.",
+                    ephemeral=True
+                )
+                return
+
+            if interaction.user.id not in (
+                self.game["white"],
+                self.game["black"]
+            ):
+                await interaction.response.send_message(
+                    "Você não participa desta partida.",
+                    ephemeral=True
+                )
+                return
+
+            if interaction.user.id == self.game["white"]:
+                resultado = "0-1"
+                vencedor = "⚫ Pretas venceram!"
+            else:
+                resultado = "1-0"
+                vencedor = "⚪ Brancas venceram!"
+
+            resultado_elo = finalizar_partida(
+                self.game,
+                resultado,
+                "Desistência"
+            )
+
+            if resultado_elo is None:
+                await interaction.response.send_message(
+                    "Não foi possível finalizar essa partida.",
+                    ephemeral=True
+                )
+                return
+
+            embed = criar_embed_final(
+                self.game,
+                "♟️ DISCHESS — Desistência",
+                (
+                    f"{interaction.user.mention} desistiu da partida.\n"
+                    f"**{vencedor}**"
+                ),
+                resultado_elo
+            )
+
+            for item in self.children:
+                item.disabled = True
+
+            await interaction.response.edit_message(
+                content="Desistência confirmada.",
+                view=self
+            )
+
+            if self.game.get("message"):
+                try:
+                    await self.game["message"].edit(
+                        content=None,
+                        embed=embed,
+                        view=None
+                    )
+                except discord.HTTPException:
+                    logging.exception(
+                        "Não foi possível atualizar o tabuleiro após desistência."
+                    )
+
+    @discord.ui.button(
+        label="Cancelar",
+        style=discord.ButtonStyle.secondary
+    )
+    async def cancelar(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.response.edit_message(
+            content="Ação cancelada.",
+            view=self
+        )
+
+
+# ============================================================
+# 9. ATUALIZAÇÃO DO TABULEIRO
+# ============================================================
+
+async def atualizar_tabuleiro(interaction, game, view):
+    board = game["board"]
+
+    if board.is_game_over():
+        resultado = board.result()
+        motivo = motivo_fim(board)
+
+        resultado_elo = finalizar_partida(
+            game,
+            resultado,
+            motivo
+        )
+
+        if resultado_elo is None:
+            await interaction.response.send_message(
+                "Não foi possível finalizar a partida.",
+                ephemeral=True
+            )
+            return
+
+        if resultado == "1-0":
+            vencedor = "⚪ Brancas venceram!"
+
+        elif resultado == "0-1":
+            vencedor = "⚫ Pretas venceram!"
+
+        else:
+            vencedor = "🤝 A partida terminou empatada!"
+
+        embed = criar_embed_final(
+            game,
+            "♟️ DISCHESS — Partida encerrada",
+            f"**{vencedor}**\nMotivo: {motivo}",
+            resultado_elo
+        )
+
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=None
+        )
+
         return
 
-    global user_elo, pending_challenges, active_games
-    user_elo = {}
-    pending_challenges = {}
-    active_games = {}
-    save_elo()
+    view.rebuild()
 
-    guild = interaction.guild
-    if guild:
-        nomes_todas_patentes = [p[2] for p in PATENTES]
-        for member in guild.members:
-            cargos_remover = [role for role in member.roles if role.name in nomes_todas_patentes]
-            if cargos_remover:
+    await interaction.response.edit_message(
+        content=None,
+        embed=criar_embed_partida(game),
+        view=view
+    )
+
+
+# ============================================================
+# 10. DESAFIOS
+# ============================================================
+
+class ChallengeView(discord.ui.View):
+
+    def __init__(
+        self,
+        challenge_id,
+        challenger,
+        opponent,
+        channel_id
+    ):
+        super().__init__(timeout=TEMPO_DESAFIO)
+
+        self.challenge_id = challenge_id
+        self.challenger = challenger
+        self.opponent = opponent
+        self.channel_id = channel_id
+
+        self.message = None
+        self.resolved = False
+
+    def desafio_valido(self):
+        challenge = pending_challenges.get(self.challenge_id)
+
+        if challenge is None:
+            return False
+
+        return (
+            challenge["challenger"] == self.challenger
+            and challenge["opponent"] == self.opponent
+            and challenge["channel_id"] == self.channel_id
+        )
+
+    async def on_timeout(self):
+        async with challenge_lock:
+
+            if self.resolved:
+                return
+
+            self.resolved = True
+
+            if self.desafio_valido():
+                pending_challenges.pop(self.challenge_id, None)
+
+            for item in self.children:
+                item.disabled = True
+
+            if self.message:
                 try:
-                    await member.remove_roles(*cargos_remover)
-                except Exception:
+                    await self.message.edit(
+                        content="⌛ O desafio expirou.",
+                        view=self
+                    )
+                except discord.HTTPException:
                     pass
 
-    await interaction.response.send_message("🔄 **RESET COMPLETO!** Todos os ELOs, histórico e cargos foram zerados para 100 de ELO.")
+    @discord.ui.button(
+        label="Aceitar",
+        emoji="✅",
+        style=discord.ButtonStyle.success
+    )
+    async def aceitar(self, interaction, button):
+        async with challenge_lock:
 
-TOKEN = os.getenv("DISCORD_TOKEN")
-if TOKEN:
-    bot.run(TOKEN)
-else:
-    print("ERRO: O token do Discord não foi encontrado nas variáveis de ambiente.")
+            if interaction.user.id != self.opponent:
+                await interaction.response.send_message(
+                    "Somente o jogador desafiado pode aceitar.",
+                    ephemeral=True
+                )
+                return
+
+            if self.resolved or not self.desafio_valido():
+                await interaction.response.send_message(
+                    "Esse desafio já foi resolvido ou expirou.",
+                    ephemeral=True
+                )
+                return
+
+            if jogador_em_jogo(self.challenger) or jogador_em_jogo(self.opponent):
+                await interaction.response.send_message(
+                    "Um dos jogadores já está em uma partida.",
+                    ephemeral=True
+                )
+                return
+
+            if self.channel_id in active_games:
+                await interaction.response.send_message(
+                    "Já existe uma partida neste canal.",
+                    ephemeral=True
+                )
+                return
+
+            # Remove o convite antes de iniciar a partida.
+            pending_challenges.pop(self.challenge_id, None)
+
+            self.resolved = True
+
+            game = criar_partida(
+                self.challenger,
+                self.opponent,
+                self.channel_id
+            )
+
+            active_games[self.channel_id] = game
+
+            view = ChessBoardView(game)
+
+            # A mensagem do convite se transforma no tabuleiro.
+            game["message"] = interaction.message
+
+            await interaction.response.edit_message(
+                content=None,
+                embed=criar_embed_partida(game),
+                view=view
+            )
+
+    @discord.ui.button(
+        label="Recusar",
+        emoji="❌",
+        style=discord.ButtonStyle.danger
+    )
+    async def recusar(self, interaction, button):
+        async with challenge_lock:
+
+            if interaction.user.id not in (
+                self.challenger,
+                self.opponent
+            ):
+                await interaction.response.send_message(
+                    "Você não participa deste desafio.",
+                    ephemeral=True
+                )
+                return
+
+            if self.resolved or not self.desafio_valido():
+                await interaction.response.send_message(
+                    "Esse desafio já foi resolvido ou expirou.",
+                    ephemeral=True
+                )
+                return
+
+            pending_challenges.pop(self.challenge_id, None)
+
+            self.resolved = True
+
+            for item in self.children:
+                item.disabled = True
+
+            await interaction.response.edit_message(
+                content="❌ O desafio foi recusado/cancelado.",
+                embed=None,
+                view=self
+            )
+
+
+# ============================================================
+# 11. COMANDO: DESAFIAR
+# ============================================================
+
+@bot.tree.command(
+    name="desafiar",
+    description="Desafie outro jogador para uma partida de xadrez."
+)
+@app_commands.describe(
+    jogador="Jogador que você deseja desafiar"
+)
+async def desafiar(
+    interaction: discord.Interaction,
+    jogador: discord.Member
+):
+    if jogador.bot:
+        await interaction.response.send_message(
+            "Você não pode desafiar bots.",
+            ephemeral=True
+        )
+        return
+
+    if jogador.id == interaction.user.id:
+        await interaction.response.send_message(
+            "Você não pode desafiar a si mesmo.",
+            ephemeral=True
+        )
+        return
+
+    async with challenge_lock:
+
+        if jogador_ocupado(interaction.user.id):
+            await interaction.response.send_message(
+                "Você já está em uma partida ou desafio pendente.",
+                ephemeral=True
+            )
+            return
+
+        if jogador_ocupado(jogador.id):
+            await interaction.response.send_message(
+                "Esse jogador já está em uma partida ou desafio pendente.",
+                ephemeral=True
+            )
+            return
+
+        if interaction.channel_id in active_games:
+            await interaction.response.send_message(
+                "Já existe uma partida neste canal.",
+                ephemeral=True
+            )
+            return
+
+        challenge_id = str(uuid.uuid4())
+
+        view = ChallengeView(
+            challenge_id,
+            interaction.user.id,
+            jogador.id,
+            interaction.channel_id
+        )
+
+        pending_challenges[challenge_id] = {
+            "challenger": interaction.user.id,
+            "opponent": jogador.id,
+            "channel_id": interaction.channel_id
+        }
+
+    try:
+        await interaction.response.send_message(
+            f"♟️ {jogador.mention}, você foi desafiado por "
+            f"{interaction.user.mention}!\n"
+            f"Você tem {TEMPO_DESAFIO} segundos para responder.",
+            view=view
+        )
+
+        view.message = await interaction.original_response()
+
+    except Exception:
+        async with challenge_lock:
+            pending_challenges.pop(challenge_id, None)
+
+        raise
+
+
+# ============================================================
+# 12. COMANDO: PERFIL
+# ============================================================
+
+@bot.tree.command(
+    name="perfil",
+    description="Veja seu perfil ou o perfil de outro jogador."
+)
+@app_commands.describe(
+    jogador="Jogador cujo perfil deseja consultar"
+)
+async def perfil(
+    interaction: discord.Interaction,
+    jogador: discord.Member = None
+):
+    jogador = jogador or interaction.user
+
+    dados = obter_dados_usuario(jogador.id)
+
+    elo = dados["elo"]
+
+    partidas = (
+        dados["wins"]
+        + dados["losses"]
+        + dados["draws"]
+    )
+
+    taxa_vitoria = (
+        dados["wins"] / partidas * 100
+        if partidas > 0
+        else 0
+    )
+
+    embed = discord.Embed(
+        title=f"♟️ Perfil de {jogador.display_name}",
+        color=discord.Color.blurple()
+    )
+
+    embed.set_thumbnail(
+        url=jogador.display_avatar.url
+    )
+
+    embed.add_field(
+        name="ELO",
+        value=f"**{elo}**",
+        inline=True
+    )
+
+    embed.add_field(
+        name="Patente",
+        value=obter_patente(elo),
+        inline=True
+    )
+
+    embed.add_field(
+        name="Recorde de ELO",
+        value=str(dados["peak_elo"]),
+        inline=True
+    )
+
+    embed.add_field(
+        name="Vitórias",
+        value=str(dados["wins"]),
+        inline=True
+    )
+
+    embed.add_field(
+        name="Derrotas",
+        value=str(dados["losses"]),
+        inline=True
+    )
+
+    embed.add_field(
+        name="Empates",
+        value=str(dados["draws"]),
+        inline=True
+    )
+
+    embed.add_field(
+        name="Partidas",
+        value=str(partidas),
+        inline=True
+    )
+
+    embed.add_field(
+        name="Taxa de vitória",
+        value=f"{taxa_vitoria:.1f}%",
+        inline=True
+    )
+
+    await interaction.response.send_message(embed=embed)
+
+
+# ============================================================
+# 13. COMANDO: RANKING
+# ============================================================
+
+@bot.tree.command(
+    name="ranking",
+    description="Veja o ranking de ELO do DISCHESS."
+)
+async def ranking(interaction: discord.Interaction):
+    jogadores = []
+
+    for user_id, dados in user_data.items():
+
+        if isinstance(dados, int):
+            elo = dados
+        else:
+            elo = dados.get("elo", 400)
+
+        jogadores.append(
+            (int(user_id), elo)
+        )
+
+    jogadores.sort(
+        key=lambda item: item[1],
+        reverse=True
+    )
+
+    if not jogadores:
+        await interaction.response.send_message(
+            "Ainda não existem jogadores no ranking."
+        )
+        return
+
+    linhas = []
+
+    for posicao, (user_id, elo) in enumerate(
+        jogadores[:10],
+        start=1
+    ):
+        membro = (
+            interaction.guild.get_member(user_id)
+            if interaction.guild
+            else None
+        )
+
+        if membro:
+            nome = membro.display_name
+        else:
+            usuario = bot.get_user(user_id)
+            nome = usuario.name if usuario else f"Jogador {user_id}"
+
+        linhas.append(
+            f"**{posicao}.** {nome} — **{elo} ELO**"
+        )
+
+    embed = discord.Embed(
+        title="🏆 Ranking — DISCHESS",
+        description="\n".join(linhas),
+        color=discord.Color.gold()
+    )
+
+    embed.set_footer(
+        text="Ranking dos dados desta instalação do DISCHESS."
+    )
+
+    await interaction.response.send_message(embed=embed)
+
+
+# ============================================================
+# 14. COMANDO: HISTÓRICO
+# ============================================================
+
+@bot.tree.command(
+    name="historico",
+    description="Veja as partidas recentes de um jogador."
+)
+@app_commands.describe(
+    jogador="Jogador cujo histórico deseja consultar"
+)
+async def historico(
+    interaction: discord.Interaction,
+    jogador: discord.Member = None
+):
+    jogador = jogador or interaction.user
+
+    dados = obter_dados_usuario(jogador.id)
+
+    historico_partidas = dados["history"]
+
+    if not historico_partidas:
+        await interaction.response.send_message(
+            "Esse jogador ainda não possui partidas registradas.",
+            ephemeral=True
+        )
+        return
+
+    linhas = []
+
+    for partida in historico_partidas[:10]:
+
+        if int(partida["white"]) == jogador.id:
+            adversario_id = int(partida["black"])
+            resultado = partida["result"]
+
+            if resultado == "1-0":
+                situacao = "Vitória"
+            elif resultado == "0-1":
+                situacao = "Derrota"
+            else:
+                situacao = "Empate"
+
+            delta = partida["white_delta"]
+
+        else:
+            adversario_id = int(partida["white"])
+            resultado = partida["result"]
+
+            if resultado == "0-1":
+                situacao = "Vitória"
+            elif resultado == "1-0":
+                situacao = "Derrota"
+            else:
+                situacao = "Empate"
+
+            delta = partida["black_delta"]
+
+        adversario = bot.get_user(adversario_id)
+
+        nome_adversario = (
+            adversario.name
+            if adversario
+            else str(adversario_id)
+        )
+
+        linhas.append(
+            f"**{situacao}** contra {nome_adversario} "
+            f"— {delta:+} ELO\n"
+            f"Partida `{partida['id'][:8]}`"
+        )
+
+    embed = discord.Embed(
+        title=f"📜 Histórico de {jogador.display_name}",
+        description="\n".join(linhas),
+        color=discord.Color.blurple()
+    )
+
+    await interaction.response.send_message(embed=embed)
+
+
+# ============================================================
+# 15. COMANDO: ANALISAR
+# ============================================================
+
+@bot.tree.command(
+    name="analisar",
+    description="Veja o PGN de uma partida."
+)
+@app_commands.describe(
+    partida_id="ID da partida que deseja consultar (opcional)"
+)
+async def analisar(
+    interaction: discord.Interaction,
+    partida_id: str = None
+):
+    dados = obter_dados_usuario(interaction.user.id)
+
+    historico_partidas = dados["history"]
+
+    if not historico_partidas:
+        await interaction.response.send_message(
+            "Você ainda não possui partidas para analisar.",
+            ephemeral=True
+        )
+        return
+
+    partida = None
+
+    if partida_id:
+        for item in historico_partidas:
+            if item["id"].upper() == partida_id.upper():
+                partida = item
+                break
+    else:
+        partida = historico_partidas[0]
+
+    if not partida:
+        await interaction.response.send_message(
+            "Não encontrei essa partida no seu histórico.",
+            ephemeral=True
+        )
+        return
+
+    pgn = partida.get("pgn", "")
+
+    if not pgn:
+        await interaction.response.send_message(
+            "Essa partida não possui PGN salvo.",
+            ephemeral=True
+        )
+        return
+
+    if len(pgn) > 1800:
+        pgn = pgn[:1800] + "\n... (PGN reduzido)"
+
+    embed = discord.Embed(
+        title=f"♟️ PGN da partida {partida['id'][:8]}",
+        description=(
+            f"Resultado: **{partida['result']}**\n"
+            f"Motivo: **{partida['reason']}**\n\n"
+            f"```pgn\n{pgn}\n```"
+        ),
+        color=discord.Color.blurple()
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True
+    )
+
+
+# ============================================================
+# 16. INICIALIZAÇÃO
+# ============================================================
+
+@bot.event
+async def on_ready():
+    global data_loaded
+
+    if not data_loaded:
+        carregar_dados()
+        data_loaded = True
+
+    try:
+        sincronizados = await bot.tree.sync()
+
+        logging.info(
+            "%s comandos sincronizados.",
+            len(sincronizados)
+        )
+
+    except Exception:
+        logging.exception(
+            "Erro ao sincronizar os comandos."
+        )
+
+    logging.info(
+        "DISCHESS conectado como %s.",
+        bot.user
+    )
+
+
+# ============================================================
+# 17. EXECUÇÃO
+# ============================================================
+
+carregar_dados()
+data_loaded = True
+
+bot.run(TOKEN)
