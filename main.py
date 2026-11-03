@@ -36,8 +36,8 @@ def get_user_data(user_id):
     uid = str(user_id)
     if uid not in user_elo:
         user_elo[uid] = {
-            "elo": 1000,
-            "peak_elo": 1000,
+            "elo": 100,  # ELO Inicial Ajustado para 100
+            "peak_elo": 100,
             "wins": 0,
             "losses": 0,
             "draws": 0
@@ -171,12 +171,10 @@ class ChessBoardView(View):
             'r': '♜', 'n': '♞', 'b': '♝', 'q': '♛', 'k': '♚', 'p': '♟'
         }
 
-        # ETAPA 1: Se NENHUMA peça estiver selecionada, mostra botões de todas as peças com movimentos válidos
         if selected_sq is None:
             movimentos_possiveis = list(board.legal_moves)
             casas_com_origem = set(m.from_square for m in movimentos_possiveis)
 
-            # Para não estourar o limite do Discord, adicionamos botões para as peças que têm lances legais
             for sq in sorted(casas_com_origem):
                 piece = board.piece_at(sq)
                 if piece:
@@ -187,8 +185,6 @@ class ChessBoardView(View):
                     btn = Button(label=label, style=discord.ButtonStyle.primary, custom_id=f"select_{nome_casa}")
                     btn.callback = self.criar_callback_selecao(sq)
                     self.add_item(btn)
-
-        # ETAPA 2: Se UMA peça JÁ FOI selecionada, mostra as casas de destino válidas + botão de Cancelar
         else:
             origem_nome = chess.square_name(selected_sq)
             destinos = [m.to_square for m in board.legal_moves if m.from_square == selected_sq]
@@ -202,12 +198,10 @@ class ChessBoardView(View):
                 btn.callback = self.criar_callback_movimento(selected_sq, dest_sq)
                 self.add_item(btn)
 
-            # Botão de cancelar seleção
             btn_cancel = Button(label="↩️ Voltar", style=discord.ButtonStyle.secondary, custom_id="cancel")
             btn_cancel.callback = self.callback_cancelar
             self.add_item(btn_cancel)
 
-        # Botões Fixos de Controle (Empate / Desistir)
         btn_empate = Button(label="Empate", style=discord.ButtonStyle.secondary, emoji="🤝", row=4)
         btn_empate.callback = self.callback_empate
         self.add_item(btn_empate)
@@ -258,7 +252,6 @@ class ChessBoardView(View):
             board = game["board"]
             move = chess.Move(from_sq, to_sq)
             
-            # Trata promoção de peão automaticamente para Rainha se necessário
             if board.piece_at(from_sq) and board.piece_at(from_sq).piece_type == chess.PAWN:
                 if chess.square_rank(to_sq) in (0, 7):
                     move = chess.Move(from_sq, to_sq, promotion=chess.QUEEN)
@@ -267,7 +260,6 @@ class ChessBoardView(View):
             game["selected_square"] = None
             game["draw_offered_by"] = None
 
-            # Fim de jogo por Xeque-mate ou Empate do tabuleiro
             if board.is_game_over():
                 result = board.result()
                 white, black = game["white"], game["black"]
@@ -290,8 +282,8 @@ class ChessBoardView(View):
                     msg_fim = "🤝 **Fim de Jogo!** A partida terminou em empate."
                     registrar_resultado(white.id, black.id, eh_empate=True)
 
-                w_data["elo"] = max(100, w_elo)
-                b_data["elo"] = max(100, b_elo)
+                w_data["elo"] = max(0, w_elo)
+                b_data["elo"] = max(0, b_elo)
                 w_data["peak_elo"] = max(w_data["peak_elo"], w_data["elo"])
                 b_data["peak_elo"] = max(b_data["peak_elo"], b_data["elo"])
                 save_elo()
@@ -305,7 +297,6 @@ class ChessBoardView(View):
                 await interaction.response.edit_message(content=f"{msg_fim}\n{tabuleiro_txt}\nNovos ELOs:\n{white.name}: `{w_data['elo']}`\n{black.name}: `{b_data['elo']}`", embed=None, view=None)
                 return
 
-            # Continuar o jogo
             self.montar_botoes()
             proxima_vez = game["white"] if board.turn == chess.WHITE else game["black"]
             tabuleiro_txt = desenhar_tabuleiro(board)
@@ -376,11 +367,11 @@ class ChessBoardView(View):
             w_elo += int(k * (1 - 1/(1 + 10**((b_elo - w_elo)/400))))
             b_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
         else:
-            w_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
+            w_elo += int(k * (0 - 1/(1 + 10**((b_elo - w_elo)/400))))
             b_elo += int(k * (1 - 1/(1 + 10**((w_elo - b_elo)/400))))
 
-        w_data["elo"] = max(100, w_elo)
-        b_data["elo"] = max(100, b_elo)
+        w_data["elo"] = max(0, w_elo)
+        b_data["elo"] = max(0, b_elo)
         w_data["peak_elo"] = max(w_data["peak_elo"], w_data["elo"])
         b_data["peak_elo"] = max(b_data["peak_elo"], b_data["elo"])
 
@@ -470,7 +461,7 @@ async def perfil(interaction: discord.Interaction, membro: discord.Member = None
             break
 
     intervalo = max_p - min_p
-    progresso_pct = min(1.0, max(0.0, (elo_atual - min_p) / interval)) if (intervalo := max_p - min_p) > 0 else 1.0
+    progresso_pct = min(1.0, max(0.0, (elo_atual - min_p) / intervalo)) if intervalo > 0 else 1.0
     blocos = int(progresso_pct * 10)
     barra = "▰" * blocos + "▱" * (10 - blocos)
 
@@ -508,20 +499,24 @@ async def ranking(interaction: discord.Interaction):
         reverse=True
     )
     
+    medals = ["🥇", "🥈", "🥉"]
     description = ""
+    
     for index, (uid, udata) in enumerate(sorted_users[:10], start=1):
         elo_val = udata["elo"] if isinstance(udata, dict) else udata
-        patente = obter_patente(elo_val)
-                
+        
         user_obj = interaction.guild.get_member(int(uid))
-        name = user_obj.name if user_obj else f"Utilizador ({uid})"
-        description += f"**{index}.** {name} — **{elo_val} ELO** *({patente})*\n"
+        mention = user_obj.mention if user_obj else f"<@{uid}>"
+        
+        prefix = medals[index - 1] if index <= 3 else f"**{index}.**"
+        description += f"{prefix} {mention} — **{elo_val} ELO**\n"
 
     embed = discord.Embed(
-        title="👑 Top 10 - Ranking Global de Xadrez",
+        title="🏆 Ranking Global — Dischess Hub",
         description=description,
-        color=discord.Color.purple()
+        color=discord.Color.gold()
     )
+    embed.set_footer(text="Jogue partidas com /desafiar para subir no ranking!")
     await interaction.response.send_message(embed=embed)
 
 # COMANDO EXCLUSIVO DE ADMINISTRADOR / RESETAR TUDO
@@ -535,7 +530,6 @@ async def resetar_tudo(interaction: discord.Interaction):
     user_elo = {}
     save_elo()
 
-    # Remover cargos de patente dos membros no servidor
     guild = interaction.guild
     if guild:
         nomes_todas_patentes = [p[2] for p in PATENTES]
@@ -547,7 +541,7 @@ async def resetar_tudo(interaction: discord.Interaction):
                 except Exception:
                     pass
 
-    await interaction.response.send_message("🔄 **RESET COMPLETO!** Todos os ELOs, histórico e cargos de patentes foram zerados com sucesso.")
+    await interaction.response.send_message("🔄 **RESET COMPLETO!** Todos os ELOs, histórico e cargos foram zerados para 100 de ELO.")
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 if TOKEN:
