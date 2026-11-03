@@ -83,6 +83,36 @@ async def atualizar_cargo_elo(member: discord.Member, novo_elo: int):
         except Exception:
             pass
 
+# Função para desenhar o tabuleiro em texto simétrico
+def desenhar_tabuleiro(board: chess.Board):
+    pecas_unicode = {
+        'R': '♖', 'N': '♘', 'B': '♗', 'Q': '♕', 'K': '♔', 'P': '♙',
+        'r': '♜', 'n': '♞', 'b': '♝', 'q': '♛', 'k': '♚', 'p': '♟',
+        '.': '.'
+    }
+    
+    linhas = []
+    linhas.append("    a   b   c   d   e   f   g   h")
+    linhas.append("  +---+---+---+---+---+---+---+---+")
+    
+    fen_board = board.fen().split()[0]
+    ranks = fen_board.split('/')
+    
+    for i, rank in enumerate(ranks):
+        row_str = f"{8 - i} |"
+        for char in rank:
+            if char.isdigit():
+                for _ in range(int(char)):
+                    row_str += " . |"
+            else:
+                row_str += f" {pecas_unicode.get(char, char)} |"
+        row_str += f" {8 - i}"
+        linhas.append(row_str)
+        linhas.append("  +---+---+---+---+---+---+---+---+")
+        
+    linhas.append("    a   b   c   d   e   f   g   h")
+    return "```\n" + "\n".join(linhas) + "\n```"
+
 @bot.event
 async def on_ready():
     load_elo()
@@ -114,15 +144,13 @@ async def desafiar(interaction: discord.Interaction, oponente: discord.Member):
     }
 
     board = active_games[channel_id]["board"]
-    fen_parts = board.fen().split()[0]
-    board_url = f"https://fen2image.chessvision.ai/{fen_parts}"
+    tabuleiro_txt = desenhar_tabuleiro(board)
 
     embed = discord.Embed(
         title="⚔️ Partida de Xadrez Iniciada!",
-        description=f"**Brancas:** {interaction.user.mention}\n**Pretas:** {oponente.mention}\n\nÉ a vez das **Brancas** jogarem!\nUsa `/jogar <movimento>` (ex: e2e4)",
+        description=f"**Brancas:** {interaction.user.mention} ({get_user_elo(interaction.user.id)} ELO)\n**Pretas:** {oponente.mention} ({get_user_elo(oponente.id)} ELO)\n\n**Vez de:** {interaction.user.mention} (Brancas)\n{tabuleiro_txt}\nUsa `/jogar <movimento>` (ex: e2e4)",
         color=discord.Color.blue()
     )
-    embed.set_image(url=board_url)
 
     await interaction.response.send_message(embed=embed)
 
@@ -133,84 +161,81 @@ async def jogar(interaction: discord.Interaction, movimento: str):
         await interaction.response.send_message("Não há nenhuma partida ativa neste canal. Usa `/desafiar`!", ephemeral=True)
         return
 
-game = active_games[channel_id]
-board = game["board"]
-white = game["white"]
-black = game["black"]
+    game = active_games[channel_id]
+    board = game["board"]
+    white = game["white"]
+    black = game["black"]
 
-# Verificar quem tem a vez
-vez_atual = white if board.turn == chess.WHITE else black
-if interaction.user != vez_atual:
-    await interaction.response.send_message("Não é a tua vez de jogar!", ephemeral=True)
-    return
-
-try:
-    move = chess.Move.from_uci(movimento)
-    if move in board.legal_moves:
-        board.push(move)
-    else:
-        await interaction.response.send_message("Movimento inválido segundo as regras do xadrez!", ephemeral=True)
+    # Verificar quem tem a vez
+    vez_atual = white if board.turn == chess.WHITE else black
+    if interaction.user != vez_atual:
+        await interaction.response.send_message("Não é a tua vez de jogar!", ephemeral=True)
         return
-except Exception:
-    await interaction.response.send_message("Formato inválido! Usa o formato UCI (ex: e2e4, g1f3).", ephemeral=True)
-    return
 
-# Verificar fim de jogo
-if board.is_game_over():
-    result = board.result()
-    
-    # Atribuir/Atualizar ELO
-    w_id = str(white.id)
-    b_id = str(black.id)
-    
-    w_elo = get_user_elo(white.id)
-    b_elo = get_user_elo(black.id)
-    
-    # Cálculo simples de ELO
-    k = 32
-    if result == "1-0": # Brancas ganham
-        w_elo += int(k * (1 - 1/(1 + 10**((b_elo - w_elo)/400))))
-        b_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
-        msg_fim = f"🏆 **Fim de Jogo!** As Brancas ({white.mention}) venceram por xeque-mate!"
-    elif result == "0-1": # Pretas ganham
-        w_elo += int(k * (0 - 1/(1 + 10**((b_elo - w_elo)/400))))
-        b_elo += int(k * (1 - 1/(1 + 10**((w_elo - b_elo)/400))))
-        msg_fim = f"🏆 **Fim de Jogo!** As Pretas ({black.mention}) venceram por xeque-mate!"
-    else: # Empate
-        msg_fim = "🤝 **Fim de Jogo!** A partida terminou em empate."
+    try:
+        move = chess.Move.from_uci(movimento)
+        if move in board.legal_moves:
+            board.push(move)
+        else:
+            await interaction.response.send_message("Movimento inválido segundo as regras do xadrez!", ephemeral=True)
+            return
+    except Exception:
+        await interaction.response.send_message("Formato inválido! Usa o formato UCI (ex: e2e4, g1f3).", ephemeral=True)
+        return
 
-    user_elo[w_id] = max(100, w_elo)
-    user_elo[b_id] = max(100, b_elo)
-    save_elo()
-    
-    # Atualizar cargos automáticos de ELO
-    if interaction.guild:
-        await atualizar_cargo_elo(white, user_elo[w_id])
-        await atualizar_cargo_elo(black, user_elo[b_id])
+    # Verificar fim de jogo
+    if board.is_game_over():
+        result = board.result()
+        
+        # Atribuir/Atualizar ELO
+        w_id = str(white.id)
+        b_id = str(black.id)
+        
+        w_elo = get_user_elo(white.id)
+        b_elo = get_user_elo(black.id)
+        
+        k = 32
+        if result == "1-0": # Brancas ganham
+            w_elo += int(k * (1 - 1/(1 + 10**((b_elo - w_elo)/400))))
+            b_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
+            msg_fim = f"🏆 **Fim de Jogo!** As Brancas ({white.mention}) venceram por xeque-mate!"
+        elif result == "0-1": # Pretas ganham
+            w_elo += int(k * (0 - 1/(1 + 10**((b_elo - w_elo)/400))))
+            b_elo += int(k * (1 - 1/(1 + 10**((w_elo - b_elo)/400))))
+            msg_fim = f"🏆 **Fim de Jogo!** As Pretas ({black.mention}) venceram por xeque-mate!"
+        else: # Empate
+            msg_fim = "🤝 **Fim de Jogo!** A partida terminou em empate."
 
-    del active_games[channel_id]
-    await interaction.response.send_message(f"{msg_fim}\n\nNovos ELOs:\n{white.name}: `{user_elo[w_id]}`\n{black.name}: `{user_elo[b_id]}`")
-    return
+        user_elo[w_id] = max(100, w_elo)
+        user_elo[b_id] = max(100, b_elo)
+        save_elo()
+        
+        # Atualizar cargos automáticos de ELO
+        if interaction.guild:
+            await atualizar_cargo_elo(white, user_elo[w_id])
+            await atualizar_cargo_elo(black, user_elo[b_id])
 
-# Continuar o jogo se não acabou
-fen_parts = board.fen().split()[0]
-board_url = f"https://fen2image.chessvision.ai/{fen_parts}"
-proxima_vez = white if board.turn == chess.WHITE else black
+        del active_games[channel_id]
+        tabuleiro_txt = desenhar_tabuleiro(board)
+        await interaction.response.send_message(f"{msg_fim}\n{tabuleiro_txt}\nNovos ELOs:\n{white.name}: `{user_elo[w_id]}`\n{black.name}: `{user_elo[b_id]}`")
+        return
 
-embed = discord.Embed(
-    title="♟️ Tabuleiro de Xadrez",
-    description=f"Movimento efetuado: `{movimento}`\nVez de: {proxima_vez.mention}",
-    color=discord.Color.green()
-)
-embed.set_image(url=board_url)
-await interaction.response.send_message(embed=embed)
+    # Continuar o jogo se não acabou
+    tabuleiro_txt = desenhar_tabuleiro(board)
+    proxima_vez = white if board.turn == chess.WHITE else black
+
+    embed = discord.Embed(
+        title="♟️ Partida em Andamento",
+        description=f"Movimento efetuado: `{movimento}`\n**Vez de:** {proxima_vez.mention}\n{tabuleiro_txt}",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="elo", description="Consulta o teu ELO atual ou de outro jogador.")
 async def elo(interaction: discord.Interaction, membro: discord.Member = None):
     target = membro or interaction.user
     current_elo = get_user_elo(target.id)
     
-    # Descobrir patente atual para mostrar
     patente_atual = "Iniciante"
     for min_elo, max_elo, nome in PATENTES:
         if min_elo <= current_elo <= max_elo:
@@ -230,12 +255,10 @@ async def ranking(interaction: discord.Interaction):
         await interaction.response.send_message("📊 Ainda não há registos de ELO no ranking.", ephemeral=True)
         return
 
-    # Ordenar utilizadores por ELO decrescente
     sorted_users = sorted(user_elo.items(), key=lambda item: item[1], reverse=True)
     
     description = ""
     for index, (uid, elo_val) in enumerate(sorted_users[:10], start=1):
-        # Descobrir patente
         patente = "Iniciante"
         for min_elo, max_elo, nome in PATENTES:
             if min_elo <= elo_val <= max_elo:
@@ -253,7 +276,6 @@ async def ranking(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed)
 
-# Token inserido através das Variáveis de Ambiente do FadeHost (DISCORD_TOKEN)
 TOKEN = os.getenv("DISCORD_TOKEN")
 if TOKEN:
     bot.run(TOKEN)
