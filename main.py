@@ -1,5 +1,7 @@
 import os
 import json
+import urllib.request
+import urllib.parse
 import discord
 from discord.ext import commands
 from discord.ui import View, Button
@@ -14,8 +16,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 ELO_FILE = "elo_data.json"
 user_elo = {}
-active_games = {}  # {channel_id: {"board": chess.Board(), "white": user_id, "black": user_id, "draw_offered_by": None, "selected_square": None, "history_moves": []}}
-pending_challenges = {}  # {channel_id: {"challenger": Member, "opponent": Member}}
+active_games = {}
+pending_challenges = {}
 
 ADMIN_ID = 1369324713498906786
 
@@ -145,6 +147,57 @@ def desenhar_tabuleiro(board: chess.Board):
     linhas.append("  a b c d e f g h")
     return "```\n" + "\n".join(linhas) + "\n```"
 
+# --- CONSULTA AO MOTOR STOCKFISH (NUVEM LICHESS API) ---
+def consultar_stockfish(fen):
+    try:
+        url = f"https://lichess.org/api/cloud-eval?fen={urllib.parse.quote(fen)}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'DischessBot/1.0'})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            data = json.loads(response.read().decode())
+            pvs = data.get("pvs", [])
+            if pvs:
+                best_move = pvs[0].get("moves", "").split()[0] if pvs[0].get("moves") else None
+                cp = pvs[0].get("cp")
+                mate = pvs[0].get("mate")
+                return {"best_move": best_move, "cp": cp, "mate": mate}
+    except Exception:
+        pass
+    return None
+
+def classificar_lance_stockfish(board_antes: chess.Board, move: chess.Move):
+    fen_antes = board_antes.fen()
+    eval_stockfish = consultar_stockfish(fen_antes)
+
+    board_depois = board_antes.copy()
+    is_capture = board_antes.is_capture(move)
+    board_depois.push(move)
+
+    if board_depois.is_checkmate():
+        return "💎 Brilhante!!", "Lance de Mestre que levou ao Xeque-Mate!"
+
+    if eval_stockfish:
+        best = eval_stockfish.get("best_move")
+        if best and move.uci() == best:
+            if is_capture and board_antes.piece_at(move.from_square).piece_type in (chess.BISHOP, chess.KNIGHT, chess.ROOK, chess.QUEEN):
+                # Sacrifício tático apontado pelo Stockfish
+                return "💎 Brilhante!!", f"Lance recomendado pelo Stockfish (`{best}`): Sacrifício tático perfeito!"
+            return "🟢 Melhor Lance (Stockfish)", f"A jogada feita (`{move.uci()}`) foi exatamente a recomendação nº 1 do Stockfish!"
+
+    if board_depois.is_check():
+        return "🟢 Ótimo Lance", "Xeque preciso mantendo pressão no Rei adversário."
+
+    # Checa erros graves por pendura
+    turn = board_antes.turn
+    piece_moved = board_antes.piece_at(move.from_square)
+    atritado = board_depois.attackers(not turn, move.to_square)
+    defendido = board_depois.attackers(turn, move.to_square)
+    val_peca = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}.get(piece_moved.piece_type if piece_moved else 1, 1)
+
+    if atritado and not defendido and val_peca >= 3 and not is_capture:
+        return "🔴 Erro Grave (Blunder)", f"Deixou a peça na casa `{chess.square_name(move.to_square)}` pendurada sem proteção!"
+
+    return "📘 Lance Bom", "Desenvolvimento de jogo consistente."
+
 def registrar_historico_partida(white_user, black_user, vencedor_id, eh_empate, motivo, lances_uci):
     w_data = get_user_data(white_user.id)
     b_data = get_user_data(black_user.id)
@@ -190,17 +243,90 @@ def registrar_historico_partida(white_user, black_user, vencedor_id, eh_empate, 
     save_elo()
 
 def jogador_em_jogo_ou_desafio(user_id):
-    # Verifica se o jogador já está em uma partida ativa
     for g in active_games.values():
         if user_id in (g["white"].id, g["black"].id):
             return True, "em uma partida ativa"
-    # Verifica se tem um desafio pendente enviado ou recebido
     for c in pending_challenges.values():
         if user_id in (c["challenger"].id, c["opponent"].id):
             return True, "em um desafio pendente"
     return False, ""
 
-# --- SISTEMA DE PAINEL DE CONVITE ---
+# --- NAVEGADOR DE ANÁLISE COM STOCKFISH ---
+
+class MatchAnalysisView(View):
+    def __init__(self, match_data, user_name):
+        super().__init__(timeout=None)
+        self.match_data = match_data
+        self.user_name = user_name
+        self.lances = match_data.get("lances", [])
+        self.index = 0
+        
+        self.historico_estados = []
+        board_temp = chess.Board()
+        
+        self.historico_estados.append({
+            "board": board_temp.copy(),
+            "move_txt": "Início do jogo",
+            "nota": "🏁 Posição Inicial",
+            "explicacao": "As peças foram dispostas nas posições padrão."
+        })
+
+        for move_str in self.lances:
+            try:
+                m = chess.Move.from_uci(move_str)
+                nota, explicacao = classificar_lance_stockfish(board_temp, m)
+                jogada_txt = f"{'Brancas' if board_temp.turn == chess.WHITE else 'Pretas'}: `{m.uci()}`"
+                
+                board_temp.push(m)
+                self.historico_estados.append({
+                    "board": board_temp.copy(),
+                    "move_txt": jogada_txt,
+                    "nota": nota,
+                    "explicacao": explicacao
+                })
+            except Exception:
+                pass
+
+    def gerar_embed(self):
+        estado = self.historico_estados[self.index]
+        board = estado["board"]
+        tabuleiro_txt = desenhar_tabuleiro(board)
+
+        embed = discord.Embed(
+            title=f"🦈 Análise Stockfish — Partida {self.match_data['id']}",
+            description=f"**Jogador:** `{self.user_name}` | **Oponente:** `{self.match_data['oponente']}`\n**Resultado:** `{self.match_data['resultado']}` *({self.match_data['motivo']})*",
+            color=discord.Color.gold()
+        )
+
+        embed.add_field(name="📍 Lance Atual", value=f"**{self.index} / {len(self.historico_estados)-1}** — {estado['move_txt']}", inline=False)
+        embed.add_field(name="🧠 Análise do Motor", value=f"**{estado['nota']}**\n*{estado['explicacao']}*", inline=False)
+        embed.add_field(name="♟️ Tabuleiro", value=tabuleiro_txt, inline=False)
+
+        return embed
+
+    @Button(label="⏮️ Início", style=discord.ButtonStyle.secondary)
+    async def inicio(self, interaction: discord.Interaction, button: Button):
+        self.index = 0
+        await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
+
+    @Button(label="◀️ Voltar", style=discord.ButtonStyle.primary)
+    async def voltar(self, interaction: discord.Interaction, button: Button):
+        if self.index > 0:
+            self.index -= 1
+        await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
+
+    @Button(label="Avançar ▶️", style=discord.ButtonStyle.primary)
+    async def avancar(self, interaction: discord.Interaction, button: Button):
+        if self.index < len(self.historico_estados) - 1:
+            self.index += 1
+        await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
+
+    @Button(label="⏭️ Fim", style=discord.ButtonStyle.secondary)
+    async def fim(self, interaction: discord.Interaction, button: Button):
+        self.index = len(self.historico_estados) - 1
+        await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
+
+# --- PAINEL DE DESAFIO ---
 
 class ChallengeView(View):
     def __init__(self, channel_id, challenger, opponent):
@@ -475,7 +601,7 @@ class ChessBoardView(View):
             w_elo += int(k * (1 - 1/(1 + 10**((b_elo - w_elo)/400))))
             b_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
         else:
-            w_elo += int(k * (0 - 1/(1 + 10**((b_elo - w_elo)/400))))
+            w_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
             b_elo += int(k * (1 - 1/(1 + 10**((w_elo - b_elo)/400))))
 
         w_data["elo"] = max(0, w_elo)
@@ -520,13 +646,11 @@ async def desafiar(interaction: discord.Interaction, oponente: discord.Member):
         await interaction.response.send_message("❌ Já existe uma partida ou desafio em andamento neste canal!", ephemeral=True)
         return
 
-    # Validação do Desafiante
     em_jogo, motivo = jogador_em_jogo_ou_desafio(interaction.user.id)
     if em_jogo:
         await interaction.response.send_message(f"❌ Tu já estás {motivo}! Termina o desafio/partida antes de criar um novo.", ephemeral=True)
         return
 
-    # Validação do Oponente
     em_jogo_op, motivo_op = jogador_em_jogo_ou_desafio(oponente.id)
     if em_jogo_op:
         await interaction.response.send_message(f"❌ {oponente.mention} já está {motivo_op} e não pode aceitar novos desafios no momento.", ephemeral=True)
@@ -565,10 +689,10 @@ async def historico(interaction: discord.Interaction, membro: discord.Member = N
         description="\n".join(linhas),
         color=discord.Color.blue()
     )
-    embed.set_footer(text="Use /analisar <número> para ver os detalhes de uma partida!")
+    embed.set_footer(text="Use /analisar <número> para ver a análise do Stockfish!")
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="analisar", description="Exibe a análise tática detalhada de uma partida pelo ID.")
+@bot.tree.command(name="analisar", description="Navegue e veja a análise real do Stockfish lance por lance!")
 async def analisar(interaction: discord.Interaction, id_partida: int, membro: discord.Member = None):
     target = membro or interaction.user
     data = get_user_data(target.id)
@@ -579,49 +703,12 @@ async def analisar(interaction: discord.Interaction, id_partida: int, membro: di
         await interaction.response.send_message(f"❌ Partida ID `{id_partida}` não encontrada no histórico de **{target.name}**.", ephemeral=True)
         return
 
-    temp_board = chess.Board()
-    xeques = 0
-    capturas_brancas = 0
-    capturas_pretas = 0
-    lances_uci = match.get("lances", [])
+    await interaction.response.defer()
 
-    for move_str in lances_uci:
-        try:
-            m = chess.Move.from_uci(move_str)
-            if temp_board.is_capture(m):
-                if temp_board.turn == chess.WHITE:
-                    capturas_brancas += 1
-                else:
-                    capturas_pretas += 1
+    view = MatchAnalysisView(match, target.name)
+    embed = view.gerar_embed()
 
-            temp_board.push(m)
-            if temp_board.is_check():
-                xeques += 1
-        except Exception:
-            pass
-
-    total_jogadas = len(lances_uci)
-    tabuleiro_final = desenhar_tabuleiro(temp_board)
-
-    embed = discord.Embed(
-        title=f"🔍 Análise da Partida {match['id']} — {target.name}",
-        color=discord.Color.gold()
-    )
-    embed.add_field(name="⚔️ Oponente", value=f"`{match['oponente']}`", inline=True)
-    embed.add_field(name="🏆 Resultado", value=f"`{match['resultado']}`", inline=True)
-    embed.add_field(name="📌 Fim de jogo", value=f"`{match['motivo']}`", inline=True)
-
-    embed.add_field(name="♟️ Total de Lances", value=f"`{total_jogadas}`", inline=True)
-    embed.add_field(name="⚡ Xeques Aplicados", value=f"`{xeques}`", inline=True)
-    embed.add_field(name="💥 Capturas", value=f"Brancas: `{capturas_brancas}` | Pretas: `{capturas_pretas}`", inline=True)
-
-    embed.add_field(
-        name="🏁 Posição Final do Tabuleiro",
-        value=tabuleiro_final,
-        inline=False
-    )
-
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed, view=view)
 
 @bot.tree.command(name="perfil", description="Exibe a Carteirinha de Enxadrista (a tua ou de outro membro).")
 async def perfil(interaction: discord.Interaction, membro: discord.Member = None):
