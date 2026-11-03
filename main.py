@@ -2,7 +2,7 @@ import os
 import json
 import discord
 from discord.ext import commands
-from discord.ui import View, button
+from discord.ui import View, Button
 import chess
 
 # Configuração do Bot
@@ -14,9 +14,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 ELO_FILE = "elo_data.json"
 user_elo = {}
-active_games = {}  # {channel_id: {"board": chess.Board(), "white": user_id, "black": user_id, "draw_offered_by": None}}
+active_games = {}  # {channel_id: {"board": chess.Board(), "white": user_id, "black": user_id, "draw_offered_by": None, "selected_square": None}}
 
-# Carregar dados do ELO e estatísticas
+# ID do Dono do Bot (Apenas você pode resetar o sistema)
+ADMIN_ID = 1369324713498906786
+
 def load_elo():
     global user_elo
     if os.path.exists(ELO_FILE):
@@ -26,12 +28,10 @@ def load_elo():
         except Exception:
             user_elo = {}
 
-# Guardar dados no ficheiro
 def save_elo():
     with open(ELO_FILE, "w") as f:
         json.dump(user_elo, f, indent=4)
 
-# Retorna a estrutura do perfil do jogador
 def get_user_data(user_id):
     uid = str(user_id)
     if uid not in user_elo:
@@ -43,7 +43,6 @@ def get_user_data(user_id):
             "draws": 0
         }
     else:
-        # Garantir compatibilidade com dados antigos que só tinham int
         if isinstance(user_elo[uid], int):
             old_val = user_elo[uid]
             user_elo[uid] = {
@@ -78,7 +77,6 @@ async def atualizar_cargo_elo(member: discord.Member, novo_elo: int, canal=None)
     guild = member.guild
     nomes_todas_patentes = [p[2] for p in PATENTES]
     
-    # Verificar se subiu de patente para mandar o Rank Up!
     cargo_antigo = None
     for r in member.roles:
         if r.name in nomes_todas_patentes:
@@ -102,7 +100,6 @@ async def atualizar_cargo_elo(member: discord.Member, novo_elo: int, canal=None)
     if cargo_novo not in member.roles:
         try:
             await member.add_roles(cargo_novo)
-            # Anúncio de Subida de Patente (Rank Up!)
             if cargo_antigo and cargo_antigo != nome_cargo_correto and canal:
                 idx_antigo = nomes_todas_patentes.index(cargo_antigo) if cargo_antigo in nomes_todas_patentes else -1
                 idx_novo = nomes_todas_patentes.index(nome_cargo_correto)
@@ -152,44 +149,218 @@ def registrar_resultado(vencedor_id, perdedor_id, eh_empate=False):
         v_data["wins"] += 1
         p_data["losses"] += 1
 
-# Componente Visual com Botões de Ação
-class ChessControlView(View):
+# --- SISTEMA DE BOTÕES DE PEÇAS E MOVIMENTOS ---
+
+class ChessBoardView(View):
     def __init__(self, channel_id):
         super().__init__(timeout=None)
         self.channel_id = channel_id
+        self.montar_botoes()
 
-    @button(label="Propor / Aceitar Empate", style=discord.ButtonStyle.secondary, emoji="🤝")
-    async def btn_empate(self, interaction: discord.Interaction, button_obj: discord.ui.Button):
+    def montar_botoes(self):
+        self.clear_items()
         if self.channel_id not in active_games:
-            await interaction.response.send_message("Partida não encontrada.", ephemeral=True)
             return
 
         game = active_games[self.channel_id]
-        if interaction.user not in (game["white"], game["black"]):
-            await interaction.response.send_message("Não estás a participar nesta partida!", ephemeral=True)
+        board = game["board"]
+        selected_sq = game.get("selected_square")
+
+        pecas_unicode = {
+            'R': '♖', 'N': '♘', 'B': '♗', 'Q': '♕', 'K': '♔', 'P': '♙',
+            'r': '♜', 'n': '♞', 'b': '♝', 'q': '♛', 'k': '♚', 'p': '♟'
+        }
+
+        # ETAPA 1: Se NENHUMA peça estiver selecionada, mostra botões de todas as peças com movimentos válidos
+        if selected_sq is None:
+            movimentos_possiveis = list(board.legal_moves)
+            casas_com_origem = set(m.from_square for m in movimentos_possiveis)
+
+            # Para não estourar o limite do Discord, adicionamos botões para as peças que têm lances legais
+            for sq in sorted(casas_com_origem):
+                piece = board.piece_at(sq)
+                if piece:
+                    nome_casa = chess.square_name(sq)
+                    simbolo = pecas_unicode.get(piece.symbol(), "")
+                    label = f"{simbolo} {nome_casa}"
+                    
+                    btn = Button(label=label, style=discord.ButtonStyle.primary, custom_id=f"select_{nome_casa}")
+                    btn.callback = self.criar_callback_selecao(sq)
+                    self.add_item(btn)
+
+        # ETAPA 2: Se UMA peça JÁ FOI selecionada, mostra as casas de destino válidas + botão de Cancelar
+        else:
+            origem_nome = chess.square_name(selected_sq)
+            destinos = [m.to_square for m in board.legal_moves if m.from_square == selected_sq]
+
+            for dest_sq in destinos:
+                dest_nome = chess.square_name(dest_sq)
+                target_piece = board.piece_at(dest_sq)
+                simbolo = f"⚔️ {dest_nome}" if target_piece else dest_nome
+
+                btn = Button(label=simbolo, style=discord.ButtonStyle.success, custom_id=f"dest_{dest_nome}")
+                btn.callback = self.criar_callback_movimento(selected_sq, dest_sq)
+                self.add_item(btn)
+
+            # Botão de cancelar seleção
+            btn_cancel = Button(label="↩️ Voltar", style=discord.ButtonStyle.secondary, custom_id="cancel")
+            btn_cancel.callback = self.callback_cancelar
+            self.add_item(btn_cancel)
+
+        # Botões Fixos de Controle (Empate / Desistir)
+        btn_empate = Button(label="Empate", style=discord.ButtonStyle.secondary, emoji="🤝", row=4)
+        btn_empate.callback = self.callback_empate
+        self.add_item(btn_empate)
+
+        btn_desistir = Button(label="Desistir", style=discord.ButtonStyle.danger, emoji="🏳️", row=4)
+        btn_desistir.callback = self.callback_desistir
+        self.add_item(btn_desistir)
+
+    def criar_callback_selecao(self, square):
+        async def callback(interaction: discord.Interaction):
+            game = active_games.get(self.channel_id)
+            if not game:
+                await interaction.response.send_message("Partida não encontrada.", ephemeral=True)
+                return
+
+            vez_atual = game["white"] if game["board"].turn == chess.WHITE else game["black"]
+            if interaction.user != vez_atual:
+                await interaction.response.send_message("Não é a sua vez de jogar!", ephemeral=True)
+                return
+
+            game["selected_square"] = square
+            self.montar_botoes()
+            
+            nome_casa = chess.square_name(square)
+            proxima_vez = game["white"] if game["board"].turn == chess.WHITE else game["black"]
+            tabuleiro_txt = desenhar_tabuleiro(game["board"])
+
+            embed = discord.Embed(
+                title="♟️ Partida em Andamento",
+                description=f"**Peça selecionada:** `{nome_casa}`\nEscolha para onde deseja mover!\n\n**Vez de:** {proxima_vez.mention}\n{tabuleiro_txt}",
+                color=discord.Color.gold()
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+        return callback
+
+    def criar_callback_movimento(self, from_sq, to_sq):
+        async def callback(interaction: discord.Interaction):
+            game = active_games.get(self.channel_id)
+            if not game:
+                await interaction.response.send_message("Partida não encontrada.", ephemeral=True)
+                return
+
+            vez_atual = game["white"] if game["board"].turn == chess.WHITE else game["black"]
+            if interaction.user != vez_atual:
+                await interaction.response.send_message("Não é a sua vez de jogar!", ephemeral=True)
+                return
+
+            board = game["board"]
+            move = chess.Move(from_sq, to_sq)
+            
+            # Trata promoção de peão automaticamente para Rainha se necessário
+            if board.piece_at(from_sq) and board.piece_at(from_sq).piece_type == chess.PAWN:
+                if chess.square_rank(to_sq) in (0, 7):
+                    move = chess.Move(from_sq, to_sq, promotion=chess.QUEEN)
+
+            board.push(move)
+            game["selected_square"] = None
+            game["draw_offered_by"] = None
+
+            # Fim de jogo por Xeque-mate ou Empate do tabuleiro
+            if board.is_game_over():
+                result = board.result()
+                white, black = game["white"], game["black"]
+                w_data = get_user_data(white.id)
+                b_data = get_user_data(black.id)
+                w_elo, b_elo = w_data["elo"], b_data["elo"]
+                k = 32
+
+                if result == "1-0":
+                    w_elo += int(k * (1 - 1/(1 + 10**((b_elo - w_elo)/400))))
+                    b_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
+                    msg_fim = f"🏆 **Fim de Jogo!** As Brancas ({white.mention}) venceram por xeque-mate!"
+                    registrar_resultado(white.id, black.id, eh_empate=False)
+                elif result == "0-1":
+                    w_elo += int(k * (0 - 1/(1 + 10**((b_elo - w_elo)/400))))
+                    b_elo += int(k * (1 - 1/(1 + 10**((w_elo - b_elo)/400))))
+                    msg_fim = f"🏆 **Fim de Jogo!** As Pretas ({black.mention}) venceram por xeque-mate!"
+                    registrar_resultado(black.id, white.id, eh_empate=False)
+                else:
+                    msg_fim = "🤝 **Fim de Jogo!** A partida terminou em empate."
+                    registrar_resultado(white.id, black.id, eh_empate=True)
+
+                w_data["elo"] = max(100, w_elo)
+                b_data["elo"] = max(100, b_elo)
+                w_data["peak_elo"] = max(w_data["peak_elo"], w_data["elo"])
+                b_data["peak_elo"] = max(b_data["peak_elo"], b_data["elo"])
+                save_elo()
+
+                if interaction.guild:
+                    await atualizar_cargo_elo(white, w_data["elo"], interaction.channel)
+                    await atualizar_cargo_elo(black, b_data["elo"], interaction.channel)
+
+                del active_games[self.channel_id]
+                tabuleiro_txt = desenhar_tabuleiro(board)
+                await interaction.response.edit_message(content=f"{msg_fim}\n{tabuleiro_txt}\nNovos ELOs:\n{white.name}: `{w_data['elo']}`\n{black.name}: `{b_data['elo']}`", embed=None, view=None)
+                return
+
+            # Continuar o jogo
+            self.montar_botoes()
+            proxima_vez = game["white"] if board.turn == chess.WHITE else game["black"]
+            tabuleiro_txt = desenhar_tabuleiro(board)
+
+            embed = discord.Embed(
+                title="♟️ Partida em Andamento",
+                description=f"Movimento efetuado: `{chess.square_name(from_sq)}{chess.square_name(to_sq)}`\n**Vez de:** {proxima_vez.mention}\n{tabuleiro_txt}",
+                color=discord.Color.green()
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+        return callback
+
+    async def callback_cancelar(self, interaction: discord.Interaction):
+        game = active_games.get(self.channel_id)
+        if not game:
+            return
+        
+        vez_atual = game["white"] if game["board"].turn == chess.WHITE else game["black"]
+        if interaction.user != vez_atual:
+            await interaction.response.send_message("Não é a sua vez!", ephemeral=True)
+            return
+
+        game["selected_square"] = None
+        self.montar_botoes()
+        tabuleiro_txt = desenhar_tabuleiro(game["board"])
+
+        embed = discord.Embed(
+            title="♟️ Partida em Andamento",
+            description=f"Seleção cancelada.\n**Vez de:** {vez_atual.mention}\n{tabuleiro_txt}",
+            color=discord.Color.green()
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def callback_empate(self, interaction: discord.Interaction):
+        game = active_games.get(self.channel_id)
+        if not game or interaction.user not in (game["white"], game["black"]):
+            await interaction.response.send_message("Não estás nesta partida!", ephemeral=True)
             return
 
         if game.get("draw_offered_by") is None:
             game["draw_offered_by"] = interaction.user
             await interaction.response.send_message(f"🤝 {interaction.user.mention} propôs um empate! O oponente pode clicar no botão para aceitar.", ephemeral=False)
         elif game["draw_offered_by"] == interaction.user:
-            await interaction.response.send_message("Já propuseste um empate. Aguarda a resposta do oponente!", ephemeral=True)
+            await interaction.response.send_message("Já propuseste um empate. Aguarda o oponente!", ephemeral=True)
         else:
             white, black = game["white"], game["black"]
             registrar_resultado(white.id, black.id, eh_empate=True)
             save_elo()
             del active_games[self.channel_id]
-            await interaction.response.send_message(f"🤝 **Empate Aceito!** A partida entre {white.mention} e {black.mention} terminou em empate.")
+            await interaction.response.edit_message(content=f"🤝 **Empate Aceito!** A partida entre {white.mention} e {black.mention} terminou em empate.", embed=None, view=None)
 
-    @button(label="Desistir / Render-se", style=discord.ButtonStyle.danger, emoji="🏳️")
-    async def btn_desistir(self, interaction: discord.Interaction, button_obj: discord.ui.Button):
-        if self.channel_id not in active_games:
-            await interaction.response.send_message("Partida não encontrada.", ephemeral=True)
-            return
-
-        game = active_games[self.channel_id]
-        if interaction.user not in (game["white"], game["black"]):
-            await interaction.response.send_message("Não estás a participar nesta partida!", ephemeral=True)
+    async def callback_desistir(self, interaction: discord.Interaction):
+        game = active_games.get(self.channel_id)
+        if not game or interaction.user not in (game["white"], game["black"]):
+            await interaction.response.send_message("Não estás nesta partida!", ephemeral=True)
             return
 
         white, black = game["white"], game["black"]
@@ -205,7 +376,7 @@ class ChessControlView(View):
             w_elo += int(k * (1 - 1/(1 + 10**((b_elo - w_elo)/400))))
             b_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
         else:
-            w_elo += int(k * (0 - 1/(1 + 10**((b_elo - w_elo)/400))))
+            w_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
             b_elo += int(k * (1 - 1/(1 + 10**((w_elo - b_elo)/400))))
 
         w_data["elo"] = max(100, w_elo)
@@ -221,7 +392,9 @@ class ChessControlView(View):
             await atualizar_cargo_elo(black, b_data["elo"], interaction.channel)
 
         del active_games[self.channel_id]
-        await interaction.response.send_message(f"🏳️ {perdedor.mention} desistiu da partida!\n🏆 **Vencedor:** {vencedor.mention}\n\nNovos ELOs:\n{white.name}: `{w_data['elo']}`\n{black.name}: `{b_data['elo']}`")
+        await interaction.response.edit_message(content=f"🏳️ {perdedor.mention} desistiu da partida!\n🏆 **Vencedor:** {vencedor.mention}\n\nNovos ELOs:\n{white.name}: `{w_data['elo']}`\n{black.name}: `{b_data['elo']}`", embed=None, view=None)
+
+# --- COMANDOS DO BOT ---
 
 @bot.event
 async def on_ready():
@@ -251,98 +424,23 @@ async def desafiar(interaction: discord.Interaction, oponente: discord.Member):
         "board": chess.Board(),
         "white": interaction.user,
         "black": oponente,
-        "draw_offered_by": None
+        "draw_offered_by": None,
+        "selected_square": None
     }
 
     board = active_games[channel_id]["board"]
     tabuleiro_txt = desenhar_tabuleiro(board)
-    view = ChessControlView(channel_id)
+    view = ChessBoardView(channel_id)
 
     u1_elo = get_user_data(interaction.user.id)["elo"]
     u2_elo = get_user_data(oponente.id)["elo"]
 
     embed = discord.Embed(
         title="⚔️ Partida de Xadrez Iniciada!",
-        description=f"**Brancas:** {interaction.user.mention} ({u1_elo} ELO)\n**Pretas:** {oponente.mention} ({u2_elo} ELO)\n\n**Vez de:** {interaction.user.mention} (Brancas)\n{tabuleiro_txt}\nUsa `/jogar <movimento>` (ex: e2e4)",
+        description=f"**Brancas:** {interaction.user.mention} ({u1_elo} ELO)\n**Pretas:** {oponente.mention} ({u2_elo} ELO)\n\n**Vez de:** {interaction.user.mention} (Brancas)\n{tabuleiro_txt}\nClique na peça que deseja mover:",
         color=discord.Color.blue()
     )
 
-    await interaction.response.send_message(embed=embed, view=view)
-
-@bot.tree.command(name="jogar", description="Faz um movimento no xadrez (ex: e2e4).")
-async def jogar(interaction: discord.Interaction, movimento: str):
-    channel_id = interaction.channel.id
-    if channel_id not in active_games:
-        await interaction.response.send_message("Não há nenhuma partida ativa neste canal. Usa `/desafiar`!", ephemeral=True)
-        return
-
-    game = active_games[channel_id]
-    board = game["board"]
-    white = game["white"]
-    black = game["black"]
-
-    vez_atual = white if board.turn == chess.WHITE else black
-    if interaction.user != vez_atual:
-        await interaction.response.send_message("Não é a tua vez de jogar!", ephemeral=True)
-        return
-
-    try:
-        move = chess.Move.from_uci(movimento)
-        if move in board.legal_moves:
-            board.push(move)
-            game["draw_offered_by"] = None
-        else:
-            await interaction.response.send_message("Movimento inválido segundo as regras do xadrez!", ephemeral=True)
-            return
-    except Exception:
-        await interaction.response.send_message("Formato inválido! Usa o formato UCI (ex: e2e4, g1f3).", ephemeral=True)
-        return
-
-    if board.is_game_over():
-        result = board.result()
-        w_data = get_user_data(white.id)
-        b_data = get_user_data(black.id)
-        w_elo, b_elo = w_data["elo"], b_data["elo"]
-        k = 32
-
-        if result == "1-0":
-            w_elo += int(k * (1 - 1/(1 + 10**((b_elo - w_elo)/400))))
-            b_elo += int(k * (0 - 1/(1 + 10**((w_elo - b_elo)/400))))
-            msg_fim = f"🏆 **Fim de Jogo!** As Brancas ({white.mention}) venceram por xeque-mate!"
-            registrar_resultado(white.id, black.id, eh_empate=False)
-        elif result == "0-1":
-            w_elo += int(k * (0 - 1/(1 + 10**((b_elo - w_elo)/400))))
-            b_elo += int(k * (1 - 1/(1 + 10**((w_elo - b_elo)/400))))
-            msg_fim = f"🏆 **Fim de Jogo!** As Pretas ({black.mention}) venceram por xeque-mate!"
-            registrar_resultado(black.id, white.id, eh_empate=False)
-        else:
-            msg_fim = "🤝 **Fim de Jogo!** A partida terminou em empate."
-            registrar_resultado(white.id, black.id, eh_empate=True)
-
-        w_data["elo"] = max(100, w_elo)
-        b_data["elo"] = max(100, b_elo)
-        w_data["peak_elo"] = max(w_data["peak_elo"], w_data["elo"])
-        b_data["peak_elo"] = max(b_data["peak_elo"], b_data["elo"])
-        save_elo()
-
-        if interaction.guild:
-            await atualizar_cargo_elo(white, w_data["elo"], interaction.channel)
-            await atualizar_cargo_elo(black, b_data["elo"], interaction.channel)
-
-        del active_games[channel_id]
-        tabuleiro_txt = desenhar_tabuleiro(board)
-        await interaction.response.send_message(f"{msg_fim}\n{tabuleiro_txt}\nNovos ELOs:\n{white.name}: `{w_data['elo']}`\n{black.name}: `{b_data['elo']}`")
-        return
-
-    tabuleiro_txt = desenhar_tabuleiro(board)
-    proxima_vez = white if board.turn == chess.WHITE else black
-    view = ChessControlView(channel_id)
-
-    embed = discord.Embed(
-        title="♟️ Partida em Andamento",
-        description=f"Movimento efetuado: `{movimento}`\n**Vez de:** {proxima_vez.mention}\n{tabuleiro_txt}",
-        color=discord.Color.green()
-    )
     await interaction.response.send_message(embed=embed, view=view)
 
 @bot.tree.command(name="perfil", description="Exibe a Carteirinha de Enxadrista (a tua ou de outro membro).")
@@ -360,7 +458,6 @@ async def perfil(interaction: discord.Interaction, membro: discord.Member = None
     win_rate = (wins / total_jogos * 100) if total_jogos > 0 else 0.0
     patente_atual = obter_patente(elo_atual)
 
-    # Calcular progresso para a próxima patente
     proxima_patente_nome = "Lenda Máxima"
     min_p, max_p = 0, 3000
     for min_elo, max_elo, nome in PATENTES:
@@ -373,7 +470,7 @@ async def perfil(interaction: discord.Interaction, membro: discord.Member = None
             break
 
     intervalo = max_p - min_p
-    progresso_pct = min(1.0, max(0.0, (elo_atual - min_p) / intervalo)) if intervalo > 0 else 1.0
+    progresso_pct = min(1.0, max(0.0, (elo_atual - min_p) / interval)) if (intervalo := max_p - min_p) > 0 else 1.0
     blocos = int(progresso_pct * 10)
     barra = "▰" * blocos + "▱" * (10 - blocos)
 
@@ -426,6 +523,31 @@ async def ranking(interaction: discord.Interaction):
         color=discord.Color.purple()
     )
     await interaction.response.send_message(embed=embed)
+
+# COMANDO EXCLUSIVO DE ADMINISTRADOR / RESETAR TUDO
+@bot.tree.command(name="resetar_tudo", description="[ADMIN] Reseta todos os ELOs, estatísticas e cargos de patentes.")
+async def resetar_tudo(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_ID:
+        await interaction.response.send_message("❌ Apenas o dono do bot tem permissão para usar este comando!", ephemeral=True)
+        return
+
+    global user_elo
+    user_elo = {}
+    save_elo()
+
+    # Remover cargos de patente dos membros no servidor
+    guild = interaction.guild
+    if guild:
+        nomes_todas_patentes = [p[2] for p in PATENTES]
+        for member in guild.members:
+            cargos_remover = [role for role in member.roles if role.name in nomes_todas_patentes]
+            if cargos_remover:
+                try:
+                    await member.remove_roles(*cargos_remover)
+                except Exception:
+                    pass
+
+    await interaction.response.send_message("🔄 **RESET COMPLETO!** Todos os ELOs, histórico e cargos de patentes foram zerados com sucesso.")
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 if TOKEN:
