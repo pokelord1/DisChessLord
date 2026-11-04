@@ -70,8 +70,8 @@ data_loaded = False
 
 def dados_padrao():
     return {
-        "elo": 400,
-        "peak_elo": 400,
+        "elo": 100,
+        "peak_elo": 100,
         "wins": 0,
         "losses": 0,
         "draws": 0,
