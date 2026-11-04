@@ -5,6 +5,7 @@ import uuid
 import asyncio
 import tempfile
 import logging
+import shutil
 
 from datetime import datetime, timezone
 
@@ -33,6 +34,7 @@ if not os.path.isdir(DATA_DIR):
     DATA_DIR = "."
 
 ELO_FILE = os.path.join(DATA_DIR, "dischess_data.json")
+BACKUP_FILE = ELO_FILE + ".backup"
 
 K_FACTOR = 32
 TEMPO_DESAFIO = 120
@@ -40,6 +42,11 @@ TEMPO_PROMOCAO = 60
 TEMPO_CONFIRMACAO = 30
 
 MOVIMENTOS_POR_PAGINA = 15
+
+# Somente estes usuários podem executar /resetar.
+USUARIOS_AUTORIZADOS_RESET = {
+    1369324713498906786
+}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,6 +67,7 @@ pending_challenges = {}
 
 game_locks = {}
 challenge_lock = asyncio.Lock()
+reset_lock = asyncio.Lock()
 
 data_loaded = False
 
@@ -69,6 +77,10 @@ data_loaded = False
 # ============================================================
 
 def dados_padrao():
+    """
+    Perfil de jogadores novos.
+    Não deve ser usado para substituir perfis existentes.
+    """
     return {
         "elo": 100,
         "peak_elo": 100,
@@ -80,11 +92,22 @@ def dados_padrao():
 
 
 def carregar_dados():
+    """
+    Carrega os dados sem alterar os valores já existentes.
+
+    Perfis antigos que guardavam apenas um número são migrados
+    preservando o ELO antigo.
+    """
     global user_data
 
     if not os.path.exists(ELO_FILE):
         user_data = {}
-        logging.info("Arquivo de dados não encontrado. Novo arquivo será criado.")
+
+        logging.info(
+            "Arquivo de dados não encontrado. "
+            "Um novo será criado quando necessário."
+        )
+
         return
 
     try:
@@ -92,36 +115,68 @@ def carregar_dados():
             dados = json.load(arquivo)
 
         if not isinstance(dados, dict):
-            raise ValueError("O arquivo JSON não contém um objeto válido.")
+            raise ValueError(
+                "O arquivo JSON não contém um objeto válido."
+            )
 
-        user_data = dados
+        dados_carregados = {}
 
-        for user_id, dados_usuario in list(user_data.items()):
+        for user_id, perfil in dados.items():
 
-            if isinstance(dados_usuario, int):
-                user_data[user_id] = dados_padrao()
-                user_data[user_id]["elo"] = dados_usuario
-                user_data[user_id]["peak_elo"] = dados_usuario
+            # Compatibilidade com versões antigas que
+            # armazenavam somente o ELO como número.
+            if isinstance(perfil, int) and not isinstance(perfil, bool):
+
+                novo_perfil = dados_padrao()
+
+                novo_perfil["elo"] = perfil
+                novo_perfil["peak_elo"] = perfil
+
+                dados_carregados[user_id] = novo_perfil
+
                 continue
 
-            if not isinstance(dados_usuario, dict):
+            if not isinstance(perfil, dict):
                 raise ValueError(
                     f"Dados inválidos para o jogador {user_id}."
                 )
 
-            padrao = dados_padrao()
+            # Cria os campos ausentes sem substituir os existentes.
+            novo_perfil = dados_padrao()
+            novo_perfil.update(perfil)
 
-            for chave, valor in padrao.items():
-                if chave not in dados_usuario:
-                    dados_usuario[chave] = valor
+            if not isinstance(novo_perfil["history"], list):
+                raise ValueError(
+                    f"Histórico inválido para o jogador {user_id}."
+                )
 
-            if not isinstance(dados_usuario["history"], list):
-                dados_usuario["history"] = []
+            for campo in (
+                "elo",
+                "peak_elo",
+                "wins",
+                "losses",
+                "draws"
+            ):
+                if (
+                    not isinstance(novo_perfil[campo], int)
+                    or isinstance(novo_perfil[campo], bool)
+                ):
+                    raise ValueError(
+                        f"Campo {campo} inválido para o jogador {user_id}."
+                    )
 
-        logging.info("Dados carregados com sucesso.")
+            dados_carregados[user_id] = novo_perfil
+
+        user_data = dados_carregados
+
+        logging.info(
+            "%s perfis carregados com sucesso.",
+            len(user_data)
+        )
 
     except Exception:
         logging.exception("Erro ao carregar os dados.")
+
         raise RuntimeError(
             "O arquivo de dados está corrompido ou inacessível. "
             "O bot não será iniciado para proteger os dados existentes."
@@ -129,6 +184,9 @@ def carregar_dados():
 
 
 def salvar_dados():
+    """
+    Salva os dados usando arquivo temporário e substituição atômica.
+    """
     caminho_temporario = None
 
     try:
@@ -157,7 +215,10 @@ def salvar_dados():
     except Exception:
         logging.exception("Erro ao salvar os dados.")
 
-        if caminho_temporario and os.path.exists(caminho_temporario):
+        if (
+            caminho_temporario
+            and os.path.exists(caminho_temporario)
+        ):
             try:
                 os.remove(caminho_temporario)
             except OSError:
@@ -170,14 +231,25 @@ def obter_dados_usuario(user_id):
     user_id = str(user_id)
 
     if user_id not in user_data:
+        # Somente jogadores realmente novos recebem 100 ELO.
         user_data[user_id] = dados_padrao()
 
     elif isinstance(user_data[user_id], int):
+        # Migração de dados antigos sem perder o ELO.
         elo_antigo = user_data[user_id]
 
         user_data[user_id] = dados_padrao()
+
         user_data[user_id]["elo"] = elo_antigo
         user_data[user_id]["peak_elo"] = elo_antigo
+
+    else:
+        # Completa campos ausentes sem alterar os existentes.
+        padrao = dados_padrao()
+
+        for chave, valor in padrao.items():
+            if chave not in user_data[user_id]:
+                user_data[user_id][chave] = valor
 
     return user_data[user_id]
 
@@ -732,10 +804,6 @@ class ChessBoardView(discord.ui.View):
                 self.add_item(anterior)
                 self.add_item(proxima)
 
-        # ----------------------------------------------------
-        # BOTÕES FIXOS DE EMPATE E DESISTÊNCIA
-        # ----------------------------------------------------
-
         if self.game["draw_offer"] is None:
 
             btn_empate = discord.ui.Button(
@@ -894,8 +962,6 @@ class ChessBoardView(discord.ui.View):
 
                     return
 
-                # Cancela a oferta somente se quem a ofereceu
-                # estiver realizando o lance.
                 if self.game["draw_offer"] == interaction.user.id:
                     self.game["draw_offer"] = None
 
@@ -962,10 +1028,6 @@ class ChessBoardView(discord.ui.View):
                 view=self
             )
 
-    # --------------------------------------------------------
-    # OFERECER EMPATE
-    # --------------------------------------------------------
-
     async def callback_oferecer_empate(self, interaction):
         async with obter_lock(self.game["channel_id"]):
 
@@ -987,10 +1049,6 @@ class ChessBoardView(discord.ui.View):
                 embed=criar_embed_partida(self.game),
                 view=self
             )
-
-    # --------------------------------------------------------
-    # ACEITAR EMPATE
-    # --------------------------------------------------------
 
     async def callback_aceitar_empate(self, interaction):
         async with obter_lock(self.game["channel_id"]):
@@ -1042,10 +1100,6 @@ class ChessBoardView(discord.ui.View):
                 view=None
             )
 
-    # --------------------------------------------------------
-    # RECUSAR EMPATE
-    # --------------------------------------------------------
-
     async def callback_recusar_empate(self, interaction):
         async with obter_lock(self.game["channel_id"]):
 
@@ -1076,10 +1130,6 @@ class ChessBoardView(discord.ui.View):
                 embed=criar_embed_partida(self.game),
                 view=self
             )
-
-    # --------------------------------------------------------
-    # DESISTÊNCIA
-    # --------------------------------------------------------
 
     async def callback_desistir_clique(self, interaction):
         async with obter_lock(self.game["channel_id"]):
@@ -1136,7 +1186,10 @@ class PromotionView(discord.ui.View):
             if self.message:
                 try:
                     await self.message.edit(
-                        content="⌛ Tempo de promoção esgotado. Escolha a peça novamente.",
+                        content=(
+                            "⌛ Tempo de promoção esgotado. "
+                            "Escolha a peça novamente."
+                        ),
                         embed=criar_embed_partida(self.game),
                         view=self.parent_view
                     )
@@ -1527,6 +1580,32 @@ class ChallengeView(discord.ui.View):
                 )
                 return
 
+            if jogador_em_desafio(self.challenger) or jogador_em_desafio(self.opponent):
+                # O desafio atual ainda está pendente, então
+                # verificamos apenas se existem outros desafios.
+                outros = [
+                    desafio_id
+                    for desafio_id, desafio in pending_challenges.items()
+                    if desafio_id != self.challenge_id
+                    and (
+                        self.challenger in (
+                            desafio["challenger"],
+                            desafio["opponent"]
+                        )
+                        or self.opponent in (
+                            desafio["challenger"],
+                            desafio["opponent"]
+                        )
+                    )
+                ]
+
+                if outros:
+                    await interaction.response.send_message(
+                        "Um dos jogadores está em outro desafio pendente.",
+                        ephemeral=True
+                    )
+                    return
+
             if self.channel_id in active_games:
                 await interaction.response.send_message(
                     "Já existe uma partida neste canal.",
@@ -1534,7 +1613,6 @@ class ChallengeView(discord.ui.View):
                 )
                 return
 
-            # Remove o convite antes de iniciar a partida.
             pending_challenges.pop(self.challenge_id, None)
 
             self.resolved = True
@@ -1549,7 +1627,6 @@ class ChallengeView(discord.ui.View):
 
             view = ChessBoardView(game)
 
-            # A mensagem do convite se transforma no tabuleiro.
             game["message"] = interaction.message
 
             await interaction.response.edit_message(
@@ -1680,6 +1757,7 @@ async def desafiar(
 
         raise
 
+
 # ============================================================
 # 12. COMANDO: PERFIL
 # ============================================================
@@ -1716,7 +1794,6 @@ async def perfil(
 
     patente = obter_patente(elo)
 
-    # Progresso para a próxima patente
     if elo < 500:
         proximo_elo = 500
         proxima_patente = "Amador"
@@ -1836,7 +1913,9 @@ async def perfil(
 
     await interaction.response.send_message(
         embed=embed
-    ) 
+    )
+
+
 # ============================================================
 # 13. COMANDO: RANKING
 # ============================================================
@@ -1853,7 +1932,8 @@ async def ranking(interaction: discord.Interaction):
         if isinstance(dados, int):
             elo = dados
         else:
-            elo = dados.get("elo", 400)
+            # O padrão correto para jogadores novos é 100.
+            elo = dados.get("elo", 100)
 
         jogadores.append(
             (int(user_id), elo)
@@ -2058,7 +2138,382 @@ async def analisar(
 
 
 # ============================================================
-# 16. INICIALIZAÇÃO
+# 16. COMANDO: RESETAR
+# ============================================================
+
+class ConfirmResetView(discord.ui.View):
+
+    def __init__(self, ids_reset, escopo, nomes):
+        super().__init__(timeout=TEMPO_CONFIRMACAO)
+
+        self.ids_reset = ids_reset
+        self.escopo = escopo
+        self.nomes = nomes
+        self.resolvido = False
+
+    async def on_timeout(self):
+        if self.resolvido:
+            return
+
+        self.resolvido = True
+
+        for item in self.children:
+            item.disabled = True
+
+        try:
+            await self.message.edit(
+                content="⌛ A confirmação do reset expirou.",
+                view=self
+            )
+        except (discord.HTTPException, AttributeError):
+            pass
+
+    @discord.ui.button(
+        label="Confirmar reset",
+        emoji="⚠️",
+        style=discord.ButtonStyle.danger
+    )
+    async def confirmar(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        if interaction.user.id not in USUARIOS_AUTORIZADOS_RESET:
+            await interaction.response.send_message(
+                "❌ Você não tem autorização para isso.",
+                ephemeral=True
+            )
+            return
+
+        if self.resolvido:
+            await interaction.response.send_message(
+                "Essa confirmação já foi utilizada.",
+                ephemeral=True
+            )
+            return
+
+        async with reset_lock:
+            async with challenge_lock:
+
+                # Revalidar se algum selecionado entrou em
+                # uma partida ou desafio enquanto aguardava.
+                ocupados = [
+                    user_id
+                    for user_id in self.ids_reset
+                    if jogador_ocupado(int(user_id))
+                ]
+
+                if ocupados:
+                    await interaction.response.send_message(
+                        "❌ O reset foi cancelado. "
+                        "Um ou mais jogadores estão em partida "
+                        "ou desafio pendente.",
+                        ephemeral=True
+                    )
+                    return
+
+                self.resolvido = True
+
+                # Criar backup antes de alterar qualquer dado.
+                try:
+                    if os.path.exists(ELO_FILE):
+                        shutil.copy2(ELO_FILE, BACKUP_FILE)
+                    else:
+                        # Se ainda não existe JSON, criar backup
+                        # do estado atual em memória.
+                        with open(
+                            BACKUP_FILE,
+                            "w",
+                            encoding="utf-8"
+                        ) as arquivo:
+                            json.dump(
+                                user_data,
+                                arquivo,
+                                ensure_ascii=False,
+                                indent=4
+                            )
+
+                except Exception:
+                    logging.exception(
+                        "Não foi possível criar o backup do reset."
+                    )
+
+                    await interaction.response.send_message(
+                        "❌ Não foi possível criar o backup. "
+                        "Nenhum perfil foi alterado.",
+                        ephemeral=True
+                    )
+                    return
+
+                # Guardar estado anterior em memória.
+                dados_anteriores = json.loads(
+                    json.dumps(user_data)
+                )
+
+                # Executar reset.
+                for user_id in self.ids_reset:
+                    user_data[user_id] = dados_padrao()
+
+                # Salvar o novo estado.
+                salvou = salvar_dados()
+
+                if not salvou:
+                    user_data.clear()
+                    user_data.update(dados_anteriores)
+
+                    # Tentar recuperar o arquivo anterior.
+                    try:
+                        shutil.copy2(BACKUP_FILE, ELO_FILE)
+                    except Exception:
+                        logging.exception(
+                            "Falha ao restaurar o arquivo após reset."
+                        )
+
+                    await interaction.response.send_message(
+                        "❌ O salvamento falhou. "
+                        "Os dados anteriores foram restaurados "
+                        "em memória. Confira o backup.",
+                        ephemeral=True
+                    )
+                    return
+
+        for item in self.children:
+            item.disabled = True
+
+        if self.escopo == "me":
+            mensagem = (
+                "✅ **Seu perfil foi resetado!**\n\n"
+                "🏆 ELO: 100\n"
+                "📈 Peak: 100\n"
+                "⚔️ Partidas: 0\n"
+                "🎯 Win Rate: 0%\n"
+                "📊 V / D / E: 0 / 0 / 0"
+            )
+
+        elif self.escopo == "all":
+            mensagem = (
+                "✅ **Reset global concluído!**\n\n"
+                f"👥 Perfis resetados: **{len(self.ids_reset)}**\n"
+                "🏆 Todos voltaram para **100 ELO**.\n\n"
+                "💾 Backup anterior criado."
+            )
+
+        else:
+            mensagem = (
+                "✅ **Reset dos jogadores concluído!**\n\n"
+                f"👥 Perfis resetados: **{len(self.ids_reset)}**\n"
+                "🏆 Os perfis selecionados voltaram para **100 ELO**.\n\n"
+                "💾 Backup anterior criado.\n\n"
+                + "\n".join(self.nomes)
+            )
+
+        await interaction.response.edit_message(
+            content=mensagem,
+            view=self
+        )
+
+    @discord.ui.button(
+        label="Cancelar",
+        emoji="✖️",
+        style=discord.ButtonStyle.secondary
+    )
+    async def cancelar(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        if interaction.user.id not in USUARIOS_AUTORIZADOS_RESET:
+            await interaction.response.send_message(
+                "❌ Você não tem autorização para isso.",
+                ephemeral=True
+            )
+            return
+
+        if self.resolvido:
+            await interaction.response.send_message(
+                "Essa confirmação já foi utilizada.",
+                ephemeral=True
+            )
+            return
+
+        self.resolvido = True
+
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.response.edit_message(
+            content="❌ Reset cancelado. Nenhum perfil foi alterado.",
+            view=self
+        )
+
+
+@bot.tree.command(
+    name="resetar",
+    description="Reseta um ou mais perfis do DISCHESS."
+)
+@app_commands.choices(escopo=[
+    app_commands.Choice(
+        name="Meu perfil",
+        value="me"
+    ),
+    app_commands.Choice(
+        name="Todos globalmente",
+        value="all"
+    ),
+    app_commands.Choice(
+        name="Jogadores marcados",
+        value="selected"
+    )
+])
+@app_commands.describe(
+    escopo="Escolha quem terá o perfil resetado.",
+    jogador1="Primeiro jogador.",
+    jogador2="Segundo jogador.",
+    jogador3="Terceiro jogador.",
+    jogador4="Quarto jogador.",
+    jogador5="Quinto jogador.",
+    jogador6="Sexto jogador.",
+    jogador7="Sétimo jogador.",
+    jogador8="Oitavo jogador.",
+    jogador9="Nono jogador.",
+    jogador10="Décimo jogador."
+)
+async def resetar(
+    interaction: discord.Interaction,
+    escopo: app_commands.Choice[str],
+    jogador1: discord.User = None,
+    jogador2: discord.User = None,
+    jogador3: discord.User = None,
+    jogador4: discord.User = None,
+    jogador5: discord.User = None,
+    jogador6: discord.User = None,
+    jogador7: discord.User = None,
+    jogador8: discord.User = None,
+    jogador9: discord.User = None,
+    jogador10: discord.User = None
+):
+    # Autorização.
+    if interaction.user.id not in USUARIOS_AUTORIZADOS_RESET:
+        await interaction.response.send_message(
+            "❌ Você não tem autorização para usar este comando.",
+            ephemeral=True
+        )
+        return
+
+    marcados = [
+        jogador for jogador in [
+            jogador1,
+            jogador2,
+            jogador3,
+            jogador4,
+            jogador5,
+            jogador6,
+            jogador7,
+            jogador8,
+            jogador9,
+            jogador10
+        ]
+        if jogador is not None
+    ]
+
+    if escopo.value == "me":
+        ids_reset = [str(interaction.user.id)]
+
+    elif escopo.value == "all":
+        ids_reset = list(user_data.keys())
+
+    elif escopo.value == "selected":
+        if not marcados:
+            await interaction.response.send_message(
+                "❌ Marque pelo menos um jogador.",
+                ephemeral=True
+            )
+            return
+
+        ids_reset = list({
+            str(jogador.id)
+            for jogador in marcados
+        })
+
+    else:
+        return
+
+    if not ids_reset:
+        await interaction.response.send_message(
+            "Não existem perfis registrados para resetar.",
+            ephemeral=True
+        )
+        return
+
+    # Não permitir reset de jogadores em partidas ou desafios.
+    ocupados = [
+        user_id
+        for user_id in ids_reset
+        if jogador_ocupado(int(user_id))
+    ]
+
+    if ocupados:
+        await interaction.response.send_message(
+            "❌ Não é possível resetar agora. "
+            "Um ou mais jogadores estão em partidas "
+            "ou desafios pendentes.",
+            ephemeral=True
+        )
+        return
+
+    if escopo.value == "me":
+        descricao = (
+            "Você está prestes a resetar **seu próprio perfil**.\n"
+            "Seu ELO, Peak, estatísticas e histórico serão apagados."
+        )
+
+        nomes = []
+
+    elif escopo.value == "all":
+        descricao = (
+            f"⚠️ Você está prestes a resetar **TODOS os perfis globais** "
+            f"registrados nesta instalação.\n\n"
+            f"Perfis afetados: **{len(ids_reset)}**\n\n"
+            "Todos voltarão para 100 ELO e perderão suas estatísticas "
+            "e históricos."
+        )
+
+        nomes = []
+
+    else:
+        nomes = [
+            f"• {jogador.mention}"
+            for jogador in marcados
+        ]
+
+        descricao = (
+            "Você está prestes a resetar os seguintes jogadores:\n\n"
+            + "\n".join(nomes)
+            + "\n\nELO, Peak, estatísticas e históricos serão apagados."
+        )
+
+    descricao += (
+        "\n\n💾 Um backup será criado antes do reset."
+        "\nEssa ação não pode ser desfeita pelo próprio comando."
+    )
+
+    view = ConfirmResetView(
+        ids_reset,
+        escopo.value,
+        nomes
+    )
+
+    await interaction.response.send_message(
+        descricao,
+        view=view,
+        ephemeral=True
+    )
+
+    view.message = await interaction.original_response()
+
+
+# ============================================================
+# 17. INICIALIZAÇÃO
 # ============================================================
 
 @bot.event
@@ -2089,7 +2544,7 @@ async def on_ready():
 
 
 # ============================================================
-# 17. EXECUÇÃO
+# 18. EXECUÇÃO
 # ============================================================
 
 carregar_dados()
