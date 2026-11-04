@@ -208,7 +208,8 @@ def dados_padrao():
         "draws": 0,
         "history": [],
         "patente_override": None,
-        "titulo": None
+        "titulo": None,
+        "nickname": None
     }
 
 
@@ -298,25 +299,45 @@ def salvar_dados():
 
 def obter_dados_usuario(user_id):
     user_id = str(user_id)
-
     if user_id not in user_data:
         user_data[user_id] = dados_padrao()
-
     elif isinstance(user_data[user_id], int):
         elo_antigo = user_data[user_id]
-
         user_data[user_id] = dados_padrao()
         user_data[user_id]["elo"] = elo_antigo
         user_data[user_id]["peak_elo"] = elo_antigo
-
     else:
         padrao = dados_padrao()
-
         for chave, valor in padrao.items():
             if chave not in user_data[user_id]:
                 user_data[user_id][chave] = valor
-
     return user_data[user_id]
+
+
+def nome_jogador(user_id, guild=None):
+    """Retorna o nick global; usa um nome do Discord como alternativa."""
+    dados = obter_dados_usuario(user_id)
+    nickname = dados.get("nickname")
+    if nickname:
+        return nickname
+    membro = membro_em_guild(guild, user_id)
+    if membro:
+        return membro.display_name
+    usuario = bot.get_user(int(user_id))
+    if usuario:
+        return usuario.global_name or usuario.name
+    return "Jogador sem nick"
+
+
+def nickname_disponivel(nickname, user_id):
+    chave = nickname.casefold()
+    for outro_id, dados in user_data.items():
+        if str(outro_id) == str(user_id) or not isinstance(dados, dict):
+            continue
+        existente = dados.get("nickname")
+        if existente and existente.casefold() == chave:
+            return False
+    return True
 
 
 # ============================================================
@@ -724,20 +745,8 @@ def criar_embed_partida(game):
         color=discord.Color.blurple()
     )
 
-    brancas = bot.get_user(game["white"])
-    pretas = bot.get_user(game["black"])
-
-    nome_brancas = (
-        brancas.name
-        if brancas
-        else str(game["white"])
-    )
-
-    nome_pretas = (
-        pretas.name
-        if pretas
-        else str(game["black"])
-    )
+    nome_brancas = nome_jogador(game["white"], bot.get_guild(game.get("guild_id")))
+    nome_pretas = nome_jogador(game["black"], bot.get_guild(game.get("guild_id")))
 
     embed.add_field(
         name="⚪ Brancas",
@@ -773,14 +782,9 @@ def criar_embed_partida(game):
         )
 
     if game.get("draw_offer") is not None:
-        ofertante = bot.get_user(
-            game["draw_offer"]
-        )
-
-        nome_ofertante = (
-            ofertante.name
-            if ofertante
-            else str(game["draw_offer"])
+        nome_ofertante = nome_jogador(
+            game["draw_offer"],
+            bot.get_guild(game.get("guild_id"))
         )
 
         embed.add_field(
@@ -876,8 +880,8 @@ def gerar_pgn(game, resultado, motivo):
     partida.headers["Event"] = "DisChessLord"
     partida.headers["Site"] = "Discord"
     partida.headers["Date"] = agora_utc().strftime("%Y.%m.%d")
-    partida.headers["White"] = str(game["white"])
-    partida.headers["Black"] = str(game["black"])
+    partida.headers["White"] = nome_jogador(game["white"], bot.get_guild(game.get("guild_id")))
+    partida.headers["Black"] = nome_jogador(game["black"], bot.get_guild(game.get("guild_id")))
     partida.headers["Result"] = resultado
     partida.headers["Termination"] = motivo
 
@@ -2371,6 +2375,12 @@ async def perfil(
     )
 
     embed.add_field(
+        name="♟️ Nick DisChessLord",
+        value=dados.get("nickname") or "Ainda não definido — use /nick",
+        inline=False
+    )
+
+    embed.add_field(
         name="🏆 ELO Atual",
         value=f"`{elo}`",
         inline=False
@@ -2429,7 +2439,54 @@ async def perfil(
 
 
 # ============================================================
-# 19. RANKING
+# 19. NICKNAME GLOBAL
+# ============================================================
+
+@bot.tree.command(
+    name="nick",
+    description="Defina seu nick global no DisChessLord."
+)
+@app_commands.describe(
+    nome="Nick único que será exibido nas partidas"
+)
+async def nick(interaction, nome: str):
+    nome = " ".join(nome.strip().split())
+    if len(nome) < 3 or len(nome) > 20:
+        await interaction.response.send_message(
+            "Seu nick precisa ter entre 3 e 20 caracteres.",
+            ephemeral=True
+        )
+        return
+    if any(ord(char) < 32 for char in nome) or "@" in nome or "`" in nome:
+        await interaction.response.send_message(
+            "Seu nick contém caracteres inválidos, menções ou crases.",
+            ephemeral=True
+        )
+        return
+    if not nickname_disponivel(nome, interaction.user.id):
+        await interaction.response.send_message(
+            "Esse nick já está sendo usado. Escolha outro.",
+            ephemeral=True
+        )
+        return
+    dados = obter_dados_usuario(interaction.user.id)
+    anterior = dados.get("nickname")
+    dados["nickname"] = nome
+    if not salvar_dados():
+        dados["nickname"] = anterior
+        await interaction.response.send_message(
+            "Não foi possível salvar seu nick. Tente novamente.",
+            ephemeral=True
+        )
+        return
+    await interaction.response.send_message(
+        f"✅ Seu nick global no DisChessLord agora é **{nome}**.",
+        ephemeral=True
+    )
+
+
+# ============================================================
+# 20. RANKING
 # ============================================================
 
 @bot.tree.command(
@@ -2473,15 +2530,7 @@ async def ranking(interaction):
             else None
         )
 
-        if membro:
-            nome = membro.display_name
-        else:
-            usuario = bot.get_user(user_id)
-            nome = (
-                usuario.name
-                if usuario
-                else f"Jogador {user_id}"
-            )
+        nome = nome_jogador(user_id, interaction.guild)
 
         linhas.append(
             f"**{posicao}.** {nome} — **{elo} ELO**"
@@ -2556,13 +2605,7 @@ async def historico(
 
             delta = partida["black_delta"]
 
-        adversario = bot.get_user(adversario_id)
-
-        nome = (
-            adversario.name
-            if adversario
-            else str(adversario_id)
-        )
+        nome = nome_jogador(adversario_id, interaction.guild)
 
         linhas.append(
             f"**{situacao}** contra {nome} "
@@ -5171,6 +5214,7 @@ async def dischess(interaction):
         name="Comandos de jogador",
         value=(
             "`/desafiar`\n"
+            "`/nick`\n"
             "`/perfil`\n"
             "`/ranking`\n"
             "`/historico`\n"
