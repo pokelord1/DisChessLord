@@ -719,7 +719,7 @@ def criar_embed_partida(game):
     board = game["board"]
 
     embed = discord.Embed(
-        title="♟️ DISCHESS — Partida em andamento",
+        title="♟️ DisChessLord — Partida em andamento",
         description=desenhar_tabuleiro(board),
         color=discord.Color.blurple()
     )
@@ -792,7 +792,7 @@ def criar_embed_partida(game):
         )
 
     embed.set_footer(
-        text=f"Partida {game['id']} • DISCHESS"
+        text=f"Partida {game['id']} • DisChessLord"
     )
 
     return embed
@@ -873,7 +873,7 @@ def gerar_pgn(game, resultado, motivo):
 
     partida = chess.pgn.Game()
 
-    partida.headers["Event"] = "DISCHESS"
+    partida.headers["Event"] = "DisChessLord"
     partida.headers["Site"] = "Discord"
     partida.headers["Date"] = agora_utc().strftime("%Y.%m.%d")
     partida.headers["White"] = str(game["white"])
@@ -1528,7 +1528,7 @@ class ChessBoardView(discord.ui.View):
 
             embed = criar_embed_final(
                 self.game,
-                "🤝 DISCHESS — Empate acordado",
+                "🤝 DisChessLord — Empate acordado",
                 "Os jogadores concordaram com o empate!",
                 resultado_elo
             )
@@ -1865,7 +1865,7 @@ class ConfirmDesistenciaView(discord.ui.View):
 
             embed = criar_embed_final(
                 self.game,
-                "♟️ DISCHESS — Desistência",
+                "♟️ DisChessLord — Desistência",
                 (
                     f"{interaction.user.mention} desistiu.\n"
                     f"**{vencedor}**"
@@ -1948,7 +1948,7 @@ async def atualizar_tabuleiro(
 
         embed = criar_embed_final(
             game,
-            "♟️ DISCHESS — Partida encerrada",
+            "♟️ DisChessLord — Partida encerrada",
             f"**{vencedor}**\nMotivo: {motivo}",
             resultado_elo
         )
@@ -2488,7 +2488,7 @@ async def ranking(interaction):
         )
 
     embed = discord.Embed(
-        title="🏆 Ranking — DISCHESS",
+        title="🏆 Ranking — DisChessLord",
         description="\n".join(linhas),
         color=discord.Color.gold()
     )
@@ -3131,7 +3131,7 @@ class DashboardView(discord.ui.View):
         total_pecas = len(admin_data["pieces"])
 
         embed = discord.Embed(
-            title="📊 Estatísticas do DISCHESS",
+            title="📊 Estatísticas do DisChessLord",
             color=discord.Color.blurple()
         )
 
@@ -3188,7 +3188,7 @@ class DashboardView(discord.ui.View):
     async def voltar(self, interaction, button):
         await interaction.response.edit_message(
             embed=discord.Embed(
-                title="🛠️ DISCHESS — Dashboard",
+                title="🛠️ DisChessLord — Dashboard",
                 description="Painel administrativo principal.",
                 color=discord.Color.blurple()
             ),
@@ -3198,7 +3198,7 @@ class DashboardView(discord.ui.View):
 
 @bot.tree.command(
     name="dev_dashboard",
-    description="Abre o painel administrativo do DISCHESS."
+    description="Abre o painel administrativo do DisChessLord."
 )
 async def dev_dashboard(interaction):
     if not autorizado_dev(interaction.user.id):
@@ -3215,7 +3215,7 @@ async def dev_dashboard(interaction):
 
     await interaction.response.send_message(
         embed=discord.Embed(
-            title="🛠️ DISCHESS — Dashboard",
+            title="🛠️ DisChessLord — Dashboard",
             description="Painel administrativo principal.",
             color=discord.Color.blurple()
         ),
@@ -3559,7 +3559,7 @@ class CargoJogadorModal(discord.ui.Modal):
         try:
             await membro.add_roles(
                 cargo,
-                reason="DISCHESS Dashboard"
+                reason="DisChessLord Dashboard"
             )
         except discord.Forbidden:
             await interaction.response.send_message(
@@ -3647,7 +3647,7 @@ class JogadoresAdminView(discord.ui.View):
     async def voltar(self, interaction, button):
         await interaction.response.edit_message(
             embed=discord.Embed(
-                title="🛠️ DISCHESS — Dashboard",
+                title="🛠️ DisChessLord — Dashboard",
                 description="Painel administrativo principal.",
                 color=discord.Color.blurple()
             ),
@@ -3968,7 +3968,7 @@ class EventosAdminView(discord.ui.View):
     async def voltar(self, interaction, button):
         await interaction.response.edit_message(
             embed=discord.Embed(
-                title="🛠️ DISCHESS — Dashboard",
+                title="🛠️ DisChessLord — Dashboard",
                 description="Painel administrativo principal.",
                 color=discord.Color.blurple()
             ),
@@ -4301,7 +4301,7 @@ class TorneiosAdminView(discord.ui.View):
     async def voltar(self, interaction, button):
         await interaction.response.edit_message(
             embed=discord.Embed(
-                title="🛠️ DISCHESS — Dashboard",
+                title="🛠️ DisChessLord — Dashboard",
                 description="Painel administrativo principal.",
                 color=discord.Color.blurple()
             ),
@@ -4778,7 +4778,7 @@ class PecasAdminView(discord.ui.View):
     async def voltar(self, interaction, button):
         await interaction.response.edit_message(
             embed=discord.Embed(
-                title="🛠️ DISCHESS — Dashboard",
+                title="🛠️ DisChessLord — Dashboard",
                 description="Painel administrativo principal.",
                 color=discord.Color.blurple()
             ),
@@ -5158,11 +5158,11 @@ async def inscrever_torneio(
 
 @bot.tree.command(
     name="dischess",
-    description="Veja os comandos do DISCHESS."
+    description="Veja os comandos do DisChessLord."
 )
 async def dischess(interaction):
     embed = discord.Embed(
-        title="♟️ DISCHESS",
+        title="♟️ DisChessLord",
         description="Sistema de xadrez para Discord.",
         color=discord.Color.blurple()
     )
@@ -5227,7 +5227,7 @@ async def on_ready():
         )
 
     logging.info(
-        "DISCHESS conectado como %s.",
+        "DisChessLord conectado como %s.",
         bot.user
     )
 
