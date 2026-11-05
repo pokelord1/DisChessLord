@@ -320,7 +320,7 @@ def nome_jogador(user_id, guild=None):
     nickname = dados.get("nickname")
     if nickname:
         if autorizado_dev(user_id):
-            return f"🔹 {nickname}"
+            return f"☑️ {nickname}"
         return nickname
     membro = membro_em_guild(guild, user_id)
     if membro:
@@ -329,7 +329,7 @@ def nome_jogador(user_id, guild=None):
         usuario = bot.get_user(int(user_id))
         nome = (usuario.global_name or usuario.name) if usuario else "Jogador sem nick"
     if autorizado_dev(user_id):
-        return f"🔹 {nome}"
+        return f"☑️ {nome}"
     return nome
 
 
