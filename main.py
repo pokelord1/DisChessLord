@@ -5326,7 +5326,6 @@ async def inscrever_torneio(
 @app_commands.describe(
     quantidade="Quantidade de mensagens para apagar (1 a 1000)"
 )
-@app_commands.checks.guild_only()
 @app_commands.checks.bot_has_permissions(manage_messages=True, read_message_history=True)
 async def limparchat(interaction, quantidade: app_commands.Range[int, 1, 1000]):
     if interaction.guild is None or interaction.user.id != interaction.guild.owner_id:
