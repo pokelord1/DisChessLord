@@ -5376,8 +5376,7 @@ async def dischess(interaction):
             "`/analisar`\n"
             "`/eventos`\n"
             "`/torneios`\n"
-            "`/inscrever_torneio`"\n"
-            "`/limparchat`"
+            "`/inscrever_torneio`"
         ),
         inline=False
     )
@@ -5387,7 +5386,8 @@ async def dischess(interaction):
         value=(
             "`/dev_dashboard`\n"
             "`/dev_posicionar_peca`\n"
-            "`/resetar`"
+            "`/resetar`\n"
+            "`/limparchat`"
         ),
         inline=False
     )
