@@ -315,18 +315,33 @@ def obter_dados_usuario(user_id):
 
 
 def nome_jogador(user_id, guild=None):
-    """Retorna o nick global; usa um nome do Discord como alternativa."""
+    """Retorna o nick global e identifica visualmente a conta oficial do dev."""
     dados = obter_dados_usuario(user_id)
     nickname = dados.get("nickname")
     if nickname:
+        if autorizado_dev(user_id):
+            return f"🔹 {nickname}"
         return nickname
     membro = membro_em_guild(guild, user_id)
     if membro:
-        return membro.display_name
-    usuario = bot.get_user(int(user_id))
-    if usuario:
-        return usuario.global_name or usuario.name
-    return "Jogador sem nick"
+        nome = membro.display_name
+    else:
+        usuario = bot.get_user(int(user_id))
+        nome = (usuario.global_name or usuario.name) if usuario else "Jogador sem nick"
+    if autorizado_dev(user_id):
+        return f"🔹 {nome}"
+    return nome
+
+
+def nickname_tem_identidade_reservada(nickname):
+    """Impede que jogadores comuns imitem a equipe oficial."""
+    chave = nickname.casefold()
+    termos = (
+        "dev", "developer", "desenvolvedor", "desenvolvedora",
+        "staff", "admin", "administrador", "administradora",
+        "moderador", "moderadora", "moderator"
+    )
+    return any(termo in chave for termo in termos)
 
 
 def nickname_disponivel(nickname, user_id):
@@ -2371,7 +2386,7 @@ async def perfil(
 
     embed.add_field(
         name="♟️ Nick DisChessLord",
-        value=dados.get("nickname") or "Ainda não definido — use /nick",
+        value=nome_jogador(jogador.id, interaction.guild) if dados.get("nickname") else "Ainda não definido — use /nick",
         inline=False
     )
 
@@ -2455,6 +2470,15 @@ async def nick(interaction, nome: str):
     if any(ord(char) < 32 for char in nome) or "@" in nome or "`" in nome:
         await interaction.response.send_message(
             "Seu nick contém caracteres inválidos, menções ou crases.",
+            ephemeral=True
+        )
+        return
+    if (
+        nickname_tem_identidade_reservada(nome)
+        and not autorizado_dev(interaction.user.id)
+    ):
+        await interaction.response.send_message(
+            "Esse nick usa um identificador reservado à equipe oficial do DisChessLord.",
             ephemeral=True
         )
         return
