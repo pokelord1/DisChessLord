@@ -1122,16 +1122,6 @@ class ChessBoardView(discord.ui.View):
             self.add_item(select)
 
         if self.game["selected_square"] is not None:
-            cancelar = discord.ui.Button(
-                label="Cancelar seleção",
-                style=discord.ButtonStyle.danger,
-                row=0
-            )
-
-            cancelar.callback = self.cancelar_selecao
-
-            self.add_item(cancelar)
-
             origem = self.game["selected_square"]
 
             movimentos = [
@@ -1340,7 +1330,12 @@ class ChessBoardView(discord.ui.View):
                 )
                 return
 
-            self.game["selected_square"] = square
+            # Tocar novamente na peça selecionada cancela a seleção.
+            # Selecionar outra peça simplesmente troca a origem do movimento.
+            if self.game["selected_square"] == square:
+                self.game["selected_square"] = None
+            else:
+                self.game["selected_square"] = square
 
             self.page = 0
             self.rebuild()
