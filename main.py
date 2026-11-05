@@ -59,7 +59,27 @@ PATENTES_NOMES = [
     "Intermediário",
     "Mestre",
     "Grão-Mestre",
-    "Lenda do Xadrez",
+    "Lenda do Xadrez I",
+    "Lenda do Xadrez II",
+    "Lenda do Xadrez III",
+    "Lenda do Xadrez IV",
+    "Lenda do Xadrez V",
+    "Lenda do Xadrez VI",
+    "Lenda do Xadrez VII",
+    "Lenda do Xadrez VIII",
+    "Lenda do Xadrez IX",
+    "Lenda do Xadrez X",
+    "Lenda do Xadrez XI",
+    "Lenda do Xadrez XII",
+    "Lenda do Xadrez XIII",
+    "Lenda do Xadrez XIV",
+    "Lenda do Xadrez XV",
+    "Lenda do Xadrez XVI",
+    "Lenda do Xadrez XVII",
+    "Lenda do Xadrez XVIII",
+    "Lenda do Xadrez XIX",
+    "Lenda do Xadrez XX",
+    "Lenda do Xadrez XXI",
     "Deus do Xadrez"
 ]
 
@@ -69,7 +89,27 @@ PATENTES = [
     (1000, 1499, "Intermediário"),
     (1500, 1999, "Mestre"),
     (2000, 2999, "Grão-Mestre"),
-    (3000, 49999, "Lenda do Xadrez"),
+    (3000, 4999, "Lenda do Xadrez I"),
+    (5000, 6999, "Lenda do Xadrez II"),
+    (7000, 8999, "Lenda do Xadrez III"),
+    (9000, 11999, "Lenda do Xadrez IV"),
+    (12000, 13999, "Lenda do Xadrez V"),
+    (14000, 15999, "Lenda do Xadrez VI"),
+    (16000, 17999, "Lenda do Xadrez VII"),
+    (18000, 20999, "Lenda do Xadrez VIII"),
+    (21000, 22999, "Lenda do Xadrez IX"),
+    (23000, 24999, "Lenda do Xadrez X"),
+    (25000, 26999, "Lenda do Xadrez XI"),
+    (27000, 29999, "Lenda do Xadrez XII"),
+    (30000, 31999, "Lenda do Xadrez XIII"),
+    (32000, 33999, "Lenda do Xadrez XIV"),
+    (34000, 35999, "Lenda do Xadrez XV"),
+    (36000, 38999, "Lenda do Xadrez XVI"),
+    (39000, 40999, "Lenda do Xadrez XVII"),
+    (41000, 42999, "Lenda do Xadrez XVIII"),
+    (43000, 44999, "Lenda do Xadrez XIX"),
+    (45000, 47999, "Lenda do Xadrez XX"),
+    (48000, 49999, "Lenda do Xadrez XXI"),
     (50000, float("inf"), "Deus do Xadrez")
 ]
 
@@ -466,6 +506,12 @@ async def sincronizar_patentes_membros(guild, user_ids):
         cargos[nome] = cargo
 
     cargos_patente = set(cargos.values())
+    cargo_legado_lenda = discord.utils.get(
+        guild.roles,
+        name="Lenda do Xadrez"
+    )
+    if cargo_legado_lenda is not None:
+        cargos_patente.add(cargo_legado_lenda)
 
     for user_id in set(int(uid) for uid in user_ids):
         membro = guild.get_member(user_id)
@@ -2384,38 +2430,22 @@ async def perfil(
 
     patente = patente_do_perfil(dados)
 
-    if elo < 500:
-        proximo_elo = 500
-        proxima_patente = "Amador"
-    elif elo < 1000:
-        proximo_elo = 1000
-        proxima_patente = "Intermediário"
-    elif elo < 1500:
-        proximo_elo = 1500
-        proxima_patente = "Mestre"
-    elif elo < 2000:
-        proximo_elo = 2000
-        proxima_patente = "Grão-Mestre"
-    elif elo < 3000:
-        proximo_elo = 3000
-        proxima_patente = "Lenda do Xadrez"
-    elif elo < 50000:
-        proximo_elo = 50000
-        proxima_patente = "Deus do Xadrez"
+    indice_patente_elo = next(
+        (
+            indice for indice, (minimo, maximo, nome) in enumerate(PATENTES)
+            if minimo <= elo <= maximo
+        ),
+        0
+    )
+
+    if indice_patente_elo < len(PATENTES) - 1:
+        elo_atual_patente, _, _ = PATENTES[indice_patente_elo]
+        proximo_elo, _, proxima_patente = PATENTES[indice_patente_elo + 1]
     else:
         proximo_elo = None
         proxima_patente = None
 
     if proximo_elo is not None:
-        elo_atual_patente = {
-            "Iniciante": 0,
-            "Amador": 500,
-            "Intermediário": 1000,
-            "Mestre": 1500,
-            "Grão-Mestre": 2000,
-            "Lenda do Xadrez": 3000
-        }.get(patente, 0)
-
         progresso = (
             (elo - elo_atual_patente)
             / (proximo_elo - elo_atual_patente)
