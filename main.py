@@ -441,6 +441,66 @@ def patente_do_perfil(dados):
     )
 
 
+async def sincronizar_patentes_membros(guild, user_ids):
+    """Cria os cargos de patente e mantém um único cargo correto por jogador."""
+    if guild is None:
+        return
+
+    me = guild.me
+    if me is None or not me.guild_permissions.manage_roles:
+        logging.warning("Sem permissão para gerenciar cargos no servidor %s.", guild.id)
+        return
+
+    cargos = {}
+    for nome in PATENTES_NOMES:
+        cargo = discord.utils.get(guild.roles, name=nome)
+        if cargo is None:
+            try:
+                cargo = await guild.create_role(
+                    name=nome,
+                    reason="Cargos automáticos de patente do DisChessLord"
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                logging.exception("Não foi possível criar o cargo %s no servidor %s.", nome, guild.id)
+                return
+        cargos[nome] = cargo
+
+    cargos_patente = set(cargos.values())
+
+    for user_id in set(int(uid) for uid in user_ids):
+        membro = guild.get_member(user_id)
+        if membro is None:
+            try:
+                membro = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                continue
+
+        patente = patente_do_perfil(obter_dados_usuario(user_id))
+        cargo_correto = cargos.get(patente)
+        if cargo_correto is None:
+            continue
+
+        remover = [
+            cargo for cargo in membro.roles
+            if cargo in cargos_patente and cargo != cargo_correto
+        ]
+        adicionar = [cargo_correto] if cargo_correto not in membro.roles else []
+
+        try:
+            if remover:
+                await membro.remove_roles(
+                    *remover,
+                    reason="Atualização automática de patente do DisChessLord"
+                )
+            if adicionar:
+                await membro.add_roles(
+                    cargo_correto,
+                    reason="Atualização automática de patente do DisChessLord"
+                )
+        except (discord.Forbidden, discord.HTTPException):
+            logging.exception("Não foi possível atualizar a patente de %s no servidor %s.", user_id, guild.id)
+
+
 def calcular_delta_elo(
     elo_brancas,
     elo_pretas,
@@ -1030,6 +1090,14 @@ def finalizar_partida(game, resultado, motivo):
             "Partida %s terminou, mas não foi salva.",
             game["id"]
         )
+
+    guild_id = game.get("guild_id")
+    if guild_id is not None:
+        guild = bot.get_guild(int(guild_id))
+        if guild is not None:
+            asyncio.create_task(
+                sincronizar_patentes_membros(guild, [white, black])
+            )
 
     active_games.pop(
         game["channel_id"],
@@ -2442,6 +2510,9 @@ async def perfil(
         value=texto_progresso,
         inline=False
     )
+
+    if interaction.guild is not None:
+        await sincronizar_patentes_membros(interaction.guild, [jogador.id])
 
     await interaction.response.send_message(
         embed=embed
@@ -5215,6 +5286,71 @@ async def inscrever_torneio(
 
 
 # ============================================================
+# 32. LIMPAR CHAT
+# ============================================================
+
+@bot.tree.command(
+    name="limparchat",
+    description="Apaga uma quantidade de mensagens deste canal (somente dono do servidor)."
+)
+@app_commands.describe(
+    quantidade="Quantidade de mensagens para apagar (1 a 1000)"
+)
+@app_commands.checks.guild_only()
+@app_commands.checks.bot_has_permissions(manage_messages=True, read_message_history=True)
+async def limparchat(interaction, quantidade: app_commands.Range[int, 1, 1000]):
+    if interaction.guild is None or interaction.user.id != interaction.guild.owner_id:
+        await interaction.response.send_message(
+            "❌ Apenas o dono oficial deste servidor pode usar este comando.",
+            ephemeral=True
+        )
+        return
+
+    canal = interaction.channel
+    if not hasattr(canal, "purge"):
+        await interaction.response.send_message(
+            "❌ Este tipo de canal não permite limpar mensagens.",
+            ephemeral=True
+        )
+        return
+
+    permissoes = canal.permissions_for(interaction.guild.me)
+    if not permissoes.manage_messages or not permissoes.read_message_history:
+        await interaction.response.send_message(
+            "❌ Preciso das permissões **Gerenciar mensagens** e **Ler histórico de mensagens** neste canal.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    try:
+        apagadas = await canal.purge(
+            limit=quantidade,
+            bulk=True,
+            reason=f"/limparchat usado pelo dono do servidor {interaction.user.id}"
+        )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "❌ Não tenho permissão para apagar mensagens neste canal.",
+            ephemeral=True
+        )
+        return
+    except discord.HTTPException:
+        logging.exception("Falha ao limpar o canal %s.", canal.id)
+        await interaction.followup.send(
+            "❌ O Discord não permitiu concluir a limpeza. Verifique minhas permissões e tente novamente.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.followup.send(
+        f"🧹 **Limpeza concluída!** Apaguei {len(apagadas)} mensagem(ns) neste canal.",
+        ephemeral=True
+    )
+
+
+# ============================================================
 # 32. COMANDO DE AJUDA
 # ============================================================
 
@@ -5240,7 +5376,8 @@ async def dischess(interaction):
             "`/analisar`\n"
             "`/eventos`\n"
             "`/torneios`\n"
-            "`/inscrever_torneio`"
+            "`/inscrever_torneio`"\n"
+            "`/limparchat`"
         ),
         inline=False
     )
