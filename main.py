@@ -3125,10 +3125,12 @@ async def obter_forum_jogos(interaction):
     if isinstance(forum, discord.ForumChannel):
         return forum
     dono = interaction.guild.owner
+    aviso = (
+        f"{dono.mention if dono else 'Dono do servidor'}, o DisChessLord precisa de um canal Fórum. "
+        f"Vou tentar criar **{NOME_FORUM_JOGOS}**."
+    )
     try:
-        await interaction.channel.send(
-            f"{dono.mention if dono else 'Dono do servidor'}, o DisChessLord precisa de um canal Fórum. Vou tentar criar **{NOME_FORUM_JOGOS}**."
-        )
+        await interaction.channel.send(aviso)
     except (discord.Forbidden, discord.HTTPException, AttributeError):
         try:
             if dono:
