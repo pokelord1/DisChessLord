@@ -3945,11 +3945,28 @@ async def jogar(interaction, acao: str = None, nome: str = None, senha: str = No
 )
 async def perfil(
     interaction,
-    jogador: discord.Member = None
+    jogador: str = None
 ):
-    jogador = jogador or interaction.user
+    if jogador is None:
+        usuario = interaction.user
+        jogador_id = usuario.id
+        nick_perfil = nome_jogador(jogador_id)
+    else:
+        resultado, erro = await buscar_jogador_global(jogador)
+        if erro:
+            await interaction.response.send_message(erro, ephemeral=True)
+            return
+        jogador_id = resultado["id"]
+        usuario = resultado.get("user")
+        nick_perfil = resultado["nick"]
 
-    dados = obter_dados_usuario(jogador.id)
+    membro_local = interaction.guild.get_member(jogador_id) if interaction.guild else None
+    nome_exibicao = (
+        membro_local.display_name if membro_local
+        else (nick_perfil or (usuario.name if usuario else f"Jogador {jogador_id}"))
+    )
+
+    dados = obter_dados_usuario(jogador_id)
 
     elo = dados["elo"]
     peak_elo = dados["peak_elo"]
@@ -4012,17 +4029,18 @@ async def perfil(
         )
 
     embed = discord.Embed(
-        title=f"👤 Perfil de: {jogador.display_name}",
+        title=f"👤 Perfil de: {nome_exibicao}",
         color=discord.Color.blurple()
     )
 
-    embed.set_thumbnail(
-        url=jogador.display_avatar.url
-    )
+    if membro_local:
+        embed.set_thumbnail(url=membro_local.display_avatar.url)
+    elif usuario:
+        embed.set_thumbnail(url=usuario.display_avatar.url)
 
     embed.add_field(
         name="♟️ Nick DisChessLord",
-        value=nome_jogador(jogador.id, interaction.guild) if dados.get("nickname") else "Ainda não definido — use /nick",
+        value=nick_perfil if dados.get("nickname") else "Ainda não definido — use /nick",
         inline=False
     )
 
@@ -4079,8 +4097,8 @@ async def perfil(
         inline=False
     )
 
-    if interaction.guild is not None:
-        await sincronizar_patentes_membros(interaction.guild, [jogador.id])
+    if membro_local is not None:
+        await sincronizar_patentes_membros(interaction.guild, [jogador_id])
 
     await interaction.response.send_message(
         embed=embed
