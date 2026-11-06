@@ -419,6 +419,138 @@ for _patente, _recompensa in RECOMPENSAS_PATENTES.items():
         "reward": _recompensa
     }
 
+MISSION_OBJECTIVES = {
+    "games": ("Partidas jogadas", "games"),
+    "wins": ("Partidas vencidas", "wins"),
+    "streak": ("Vitórias consecutivas", "streak")
+}
+
+
+def atualizar_missoes_partida(game, resultado):
+    guild = bot.get_guild(int(game["guild_id"])) if game.get("guild_id") else None
+    for uid in (game["white"], game["black"]):
+        dados = obter_dados_usuario(uid)
+        venceu = (resultado == "1-0" and str(uid) == str(game["white"])) or (resultado == "0-1" and str(uid) == str(game["black"]))
+        admin_no_servidor = False
+        membro = guild.get_member(int(uid)) if guild else None
+        if membro:
+            perms = membro.guild_permissions
+            admin_no_servidor = bool(perms.administrator or perms.manage_guild or perms.moderate_members)
+        progresso = dados.setdefault("mission_progress", {})
+        concluidas = dados.setdefault("mission_claimed", [])
+        for mid, missao in admin_data.setdefault("missions", {}).items():
+            if not missao.get("active", True) or mid in concluidas:
+                continue
+            if missao.get("kind") == "special" and not admin_no_servidor:
+                continue
+            objetivo = missao.get("objective", "games")
+            atual = int(progresso.get(mid, 0))
+            if objetivo == "games":
+                atual += 1
+            elif objetivo == "wins" and venceu:
+                atual += 1
+            elif objetivo == "streak":
+                atual = int(dados.get("current_win_streak", 0))
+            progresso[mid] = atual
+            if atual >= int(missao.get("target", 1)):
+                recompensa = int(missao.get("reward", 0))
+                if missao.get("kind") == "special":
+                    dados["command_tickets"] = int(dados.get("command_tickets", 0)) + recompensa
+                else:
+                    dados["chesscoins"] = obter_chesscoins(uid) + recompensa
+                concluidas.append(mid)
+
+
+class MissionCreateModal(discord.ui.Modal):
+    def __init__(self, owner_id, kind, objective):
+        super().__init__(title="Criar missão especial" if kind == "special" else "Criar missão normal", timeout=180)
+        self.owner_id, self.kind, self.objective = owner_id, kind, objective
+        self.name_input = discord.ui.TextInput(label="Nome da missão", max_length=70)
+        self.target_input = discord.ui.TextInput(label="Quantidade necessária", placeholder="Ex.: 5", max_length=4)
+        self.reward_input = discord.ui.TextInput(label="Recompensa (ChessCoins)" if kind == "normal" else "Recompensa (tickets)", placeholder="Ex.: 100", max_length=7)
+        for item in (self.name_input, self.target_input, self.reward_input):
+            self.add_item(item)
+
+    async def on_submit(self, interaction):
+        if interaction.user.id != self.owner_id or not autorizado_dev(interaction.user.id):
+            await interaction.response.send_message("Sem autorização.", ephemeral=True)
+            return
+        try:
+            target, reward = int(self.target_input.value), int(self.reward_input.value)
+            if not 1 <= target <= 1000 or not 1 <= reward <= 100000:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("Quantidade deve ser de 1 a 1.000 e recompensa de 1 a 100.000.", ephemeral=True)
+            return
+        mid = gerar_id()[:10]
+        admin_data.setdefault("missions", {})[mid] = {
+            "id": mid, "name": str(self.name_input.value).strip()[:70],
+            "kind": self.kind, "objective": self.objective,
+            "target": target, "reward": reward, "active": True,
+            "created_at": data_iso()
+        }
+        if not salvar_admin():
+            admin_data["missions"].pop(mid, None)
+            await interaction.response.send_message("Não foi possível salvar a missão.", ephemeral=True)
+            return
+        moeda = "tickets administrativos" if self.kind == "special" else "ChessCoins"
+        await interaction.response.send_message(f"Missão **{self.name_input.value}** criada! Objetivo: {MISSION_OBJECTIVES[self.objective][0]} ({target}). Recompensa: {reward:,} {moeda}.", ephemeral=True)
+
+
+class MissionObjectiveSelect(discord.ui.Select):
+    def __init__(self, owner_id, kind):
+        self.owner_id, self.kind = owner_id, kind
+        opts = [discord.SelectOption(label=label, value=key) for key, (label, _) in MISSION_OBJECTIVES.items()]
+        super().__init__(placeholder="Escolha o objetivo automático", min_values=1, max_values=1, options=opts)
+
+    async def callback(self, interaction):
+        if interaction.user.id != self.owner_id or not autorizado_dev(interaction.user.id):
+            await interaction.response.send_message("Sem autorização.", ephemeral=True)
+            return
+        await interaction.response.send_modal(MissionCreateModal(self.owner_id, self.kind, self.values[0]))
+
+
+class MissionObjectiveView(discord.ui.View):
+    def __init__(self, owner_id, kind):
+        super().__init__(timeout=180)
+        self.add_item(MissionObjectiveSelect(owner_id, kind))
+
+
+class MissionAdminView(discord.ui.View):
+    def __init__(self, owner_id):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id or not autorizado_dev(interaction.user.id):
+            await interaction.response.send_message("Sem autorização.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Criar missão normal", emoji="🪙", style=discord.ButtonStyle.success)
+    async def normal(self, interaction, button):
+        await interaction.response.send_message("Escolha o objetivo da missão normal:", view=MissionObjectiveView(self.owner_id, "normal"), ephemeral=True)
+
+    @discord.ui.button(label="Criar missão especial", emoji="🎟️", style=discord.ButtonStyle.primary)
+    async def especial(self, interaction, button):
+        await interaction.response.send_message("Escolha o objetivo da missão especial (somente administradores):", view=MissionObjectiveView(self.owner_id, "special"), ephemeral=True)
+
+    @discord.ui.button(label="Listar missões", emoji="📋", style=discord.ButtonStyle.secondary)
+    async def listar(self, interaction, button):
+        items = list(admin_data.setdefault("missions", {}).values())
+        embed = discord.Embed(title="Missões globais", color=discord.Color.blurple())
+        if not items:
+            embed.description = "Nenhuma missão criada."
+        else:
+            linhas = []
+            for m in items[:20]:
+                tipo = "Especial · admins · tickets" if m.get("kind") == "special" else "Normal · todos · ChessCoins"
+                objetivo = MISSION_OBJECTIVES.get(m.get("objective"), ("Objetivo desconhecido", ""))[0]
+                linhas.append(f"**{m.get('name')}** — {tipo}\\n{objetivo}: {m.get('target')} · Recompensa: {m.get('reward')}")
+            embed.description = "\\n\\n".join(linhas)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 def verificar_conquistas(user_id):
     dados = obter_dados_usuario(user_id)
     partidas = len(dados.get("history", []))
@@ -643,7 +775,8 @@ def dados_admin_padrao():
         "tournaments": {},
         "pieces": {},
         "settings": {"role_prices": {}},
-        "raffles": {}
+        "raffles": {},
+        "missions": {}
     }
 
 
@@ -674,7 +807,8 @@ def carregar_admin():
             "tournaments",
             "pieces",
             "settings",
-            "raffles"
+            "raffles",
+            "missions"
         ):
             if not isinstance(padrao[chave], dict):
                 raise ValueError(
@@ -1476,6 +1610,7 @@ def finalizar_partida(game, resultado, motivo):
     for user_id in (white, black):
         verificar_conquistas(user_id)
 
+    atualizar_missoes_partida(game, resultado)
     salvou = salvar_dados()
 
     if not salvou:
@@ -3573,9 +3708,6 @@ class SorteioCriarModal(discord.ui.Modal):
             return
         dados_admin = obter_dados_usuario(interaction.user.id)
         saldo_tickets = int(dados_admin.get("command_tickets", 0))
-        if saldo_tickets < 1:
-            await interaction.response.send_message("Você precisa de 1 ticket administrativo para criar um sorteio. Peça ao desenvolvedor para distribuir tickets.", ephemeral=True)
-            return
         nome = " ".join(str(self.nome.value).split())
         try:
             moedas=int(str(self.premio_moedas.value or "0").strip() or "0")
@@ -3594,14 +3726,11 @@ class SorteioCriarModal(discord.ui.Modal):
             "guild_id": interaction.guild_id, "channel_id": interaction.channel_id,
             "created_by": interaction.user.id
         }
-        dados_admin["command_tickets"] = saldo_tickets - 1
-        if not salvar_dados() or not salvar_admin():
-            dados_admin["command_tickets"] = saldo_tickets
+        if not salvar_admin():
             admin_data["raffles"].pop(rid, None)
-            salvar_dados()
-            await interaction.response.send_message("Falha ao salvar o sorteio; ticket devolvido.", ephemeral=True)
+            await interaction.response.send_message("Falha ao salvar o sorteio.", ephemeral=True)
             return
-        await interaction.response.send_message(f"🎟️ Sorteio **{nome}** criado e aguardando início! Foi usado 1 ticket administrativo. Restam **{saldo_tickets - 1}**.", ephemeral=False)
+        await interaction.response.send_message(f"🎟️ Sorteio **{nome}** criado e aguardando início. A forma de pagamento será escolhida ao iniciar.", ephemeral=False)
 
 
 class TicketsModal(discord.ui.Modal):
@@ -4246,6 +4375,22 @@ class DashboardView(discord.ui.View):
                 self.owner_id,
                 self.guild_id
             )
+        )
+
+    @discord.ui.button(
+        label="Missões globais",
+        emoji="🎯",
+        style=discord.ButtonStyle.success,
+        row=2
+    )
+    async def missoes_globais(self, interaction, button):
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="🎯 Missões globais",
+                description="Crie missões normais para todos os jogadores e missões especiais para administradores. O bot acompanha partidas e concede a recompensa automaticamente.",
+                color=discord.Color.gold()
+            ),
+            view=MissionAdminView(self.owner_id)
         )
 
     @discord.ui.button(
