@@ -642,7 +642,7 @@ def dados_admin_padrao():
         "events": {},
         "tournaments": {},
         "pieces": {},
-        "settings": {},
+        "settings": {"role_prices": {}},
         "raffles": {}
     }
 
@@ -3685,6 +3685,88 @@ async def participar_sorteio(interaction, nome_sorteio: str):
 # 23. DASHBOARD — MENU PRINCIPAL
 # ============================================================
 
+class PrecoCargoModal(discord.ui.Modal):
+    def __init__(self, owner_id, guild_id):
+        super().__init__(title="Definir preço de cargo", timeout=180)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.role_id = discord.ui.TextInput(label="ID do cargo", placeholder="Ative o modo desenvolvedor e copie o ID", max_length=25)
+        self.price = discord.ui.TextInput(label="Preço em ChessCoins (0 para remover)", placeholder="Ex.: 2500", max_length=12)
+        self.add_item(self.role_id)
+        self.add_item(self.price)
+
+    async def on_submit(self, interaction):
+        if interaction.user.id != self.owner_id or not autorizado_dev(interaction.user.id):
+            await interaction.response.send_message("Sem autorização.", ephemeral=True)
+            return
+        if interaction.guild is None or interaction.guild.id != self.guild_id:
+            await interaction.response.send_message("Use esta configuração no mesmo servidor em que abriu o painel.", ephemeral=True)
+            return
+        try:
+            role = interaction.guild.get_role(int(str(self.role_id.value).strip()))
+            price = int(str(self.price.value).strip())
+            if role is None or role.is_default() or role.managed or price < 0 or price > 1000000000:
+                raise ValueError
+            bot_member = interaction.guild.me
+            if role >= interaction.user.top_role or bot_member is None or role >= bot_member.top_role:
+                await interaction.response.send_message("Não é permitido configurar cargos iguais ou superiores ao seu cargo ou ao cargo do bot.", ephemeral=True)
+                return
+        except ValueError:
+            await interaction.response.send_message("ID de cargo ou preço inválido. O preço deve ser de 0 a 1.000.000.000.", ephemeral=True)
+            return
+        settings = admin_data.setdefault("settings", {})
+        tabela = settings.setdefault("role_prices", {})
+        servidor = tabela.setdefault(str(self.guild_id), {})
+        anterior = servidor.get(str(role.id))
+        if price == 0:
+            servidor.pop(str(role.id), None)
+            mensagem = f"Preço de **{role.name}** removido da tabela."
+        else:
+            servidor[str(role.id)] = price
+            mensagem = f"Preço de **{role.name}** definido para **{price:,} ChessCoins**."
+        if not salvar_admin():
+            if anterior is None:
+                servidor.pop(str(role.id), None)
+            else:
+                servidor[str(role.id)] = anterior
+            await interaction.response.send_message("Não foi possível salvar a tabela; a alteração foi revertida.", ephemeral=True)
+            return
+        await interaction.response.send_message("✅ " + mensagem, ephemeral=True)
+
+
+class EconomiaCargosView(discord.ui.View):
+    def __init__(self, owner_id, guild_id):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id or not autorizado_dev(interaction.user.id):
+            await interaction.response.send_message("Sem autorização.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Definir/editar preço", emoji="🪙", style=discord.ButtonStyle.success)
+    async def definir_preco(self, interaction, button):
+        await interaction.response.send_modal(PrecoCargoModal(self.owner_id, self.guild_id))
+
+    @discord.ui.button(label="Atualizar lista", emoji="🔄", style=discord.ButtonStyle.secondary)
+    async def atualizar_lista(self, interaction, button):
+        await interaction.response.edit_message(embed=self.criar_embed(interaction.guild), view=self)
+
+    def criar_embed(self, guild):
+        tabela = admin_data.setdefault("settings", {}).setdefault("role_prices", {}).get(str(self.guild_id), {})
+        embed = discord.Embed(title="🪙 Economia — Preços dos cargos", color=discord.Color.gold())
+        linhas = []
+        for role_id, price in tabela.items():
+            role = guild.get_role(int(role_id)) if guild else None
+            if role is not None:
+                linhas.append(f"• {role.mention} — **{int(price):,} ChessCoins**")
+        embed.description = "\n".join(linhas) if linhas else "Nenhum cargo configurado ainda. Use **Definir/editar preço** para adicionar."
+        embed.set_footer(text="Defina 0 para remover um cargo da tabela. Os preços são independentes por servidor.")
+        return embed
+
+
 class DashboardView(discord.ui.View):
 
     def __init__(self, owner_id, guild_id):
@@ -3834,6 +3916,19 @@ class DashboardView(discord.ui.View):
                 description="Crie sorteios, distribua tickets e encerre sorteios abertos.",
                 color=discord.Color.gold()
             ),
+            view=view
+        )
+
+    @discord.ui.button(
+        label="Economia",
+        emoji="🪙",
+        style=discord.ButtonStyle.success,
+        row=3
+    )
+    async def economia(self, interaction, button):
+        view = EconomiaCargosView(self.owner_id, self.guild_id)
+        await interaction.response.edit_message(
+            embed=view.criar_embed(interaction.guild),
             view=view
         )
 
