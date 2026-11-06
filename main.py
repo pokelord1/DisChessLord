@@ -3083,18 +3083,9 @@ class ConfirmResetView(discord.ui.View):
     description="Reseta um ou mais perfis."
 )
 @app_commands.choices(escopo=[
-    app_commands.Choice(
-        name="Meu perfil",
-        value="me"
-    ),
-    app_commands.Choice(
-        name="Todos globalmente",
-        value="all"
-    ),
-    app_commands.Choice(
-        name="Jogadores marcados",
-        value="selected"
-    )
+    app_commands.Choice(name="Meu perfil", value="me"),
+    app_commands.Choice(name="Todos globalmente", value="all"),
+    app_commands.Choice(name="Jogador específico", value="selected")
 ])
 @app_commands.choices(titulo=[
     app_commands.Choice(name="Não", value="nao"),
@@ -3106,34 +3097,16 @@ class ConfirmResetView(discord.ui.View):
 ])
 @app_commands.describe(
     escopo="Quem será resetado",
-    titulo="Também resetar os títulos? (padrão: não)",
-    nick="Também resetar os nicks? (padrão: não)",
-    jogador1="Primeiro jogador",
-    jogador2="Segundo jogador",
-    jogador3="Terceiro jogador",
-    jogador4="Quarto jogador",
-    jogador5="Quinto jogador",
-    jogador6="Sexto jogador",
-    jogador7="Sétimo jogador",
-    jogador8="Oitavo jogador",
-    jogador9="Nono jogador",
-    jogador10="Décimo jogador"
+    titulo="Resetar também o título?",
+    nick="Resetar também o nick?",
+    jogador="Jogador específico (usado no escopo correspondente)"
 )
 async def resetar(
     interaction,
     escopo: app_commands.Choice[str],
-    titulo: app_commands.Choice[str] = None,
-    nick: app_commands.Choice[str] = None,
-    jogador1: discord.User = None,
-    jogador2: discord.User = None,
-    jogador3: discord.User = None,
-    jogador4: discord.User = None,
-    jogador5: discord.User = None,
-    jogador6: discord.User = None,
-    jogador7: discord.User = None,
-    jogador8: discord.User = None,
-    jogador9: discord.User = None,
-    jogador10: discord.User = None
+    titulo: app_commands.Choice[str],
+    nick: app_commands.Choice[str],
+    jogador: discord.User = None
 ):
     if interaction.user.id not in USUARIOS_AUTORIZADOS_RESET:
         await interaction.response.send_message(
@@ -3142,44 +3115,18 @@ async def resetar(
         )
         return
 
-    marcados = [
-        jogador
-        for jogador in (
-            jogador1,
-            jogador2,
-            jogador3,
-            jogador4,
-            jogador5,
-            jogador6,
-            jogador7,
-            jogador8,
-            jogador9,
-            jogador10
-        )
-        if jogador is not None
-    ]
-
     if escopo.value == "me":
-        ids_reset = [
-            str(interaction.user.id)
-        ]
-
+        ids_reset = [str(interaction.user.id)]
     elif escopo.value == "all":
         ids_reset = list(user_data.keys())
-
     elif escopo.value == "selected":
-        if not marcados:
+        if jogador is None:
             await interaction.response.send_message(
-                "Marque pelo menos um jogador.",
+                "Selecione o jogador que será resetado.",
                 ephemeral=True
             )
             return
-
-        ids_reset = list({
-            str(jogador.id)
-            for jogador in marcados
-        })
-
+        ids_reset = [str(jogador.id)]
     else:
         return
 
@@ -3190,39 +3137,31 @@ async def resetar(
         )
         return
 
-    if any(
-        jogador_ocupado(int(user_id))
-        for user_id in ids_reset
-    ):
+    if any(jogador_ocupado(int(user_id)) for user_id in ids_reset):
         await interaction.response.send_message(
             "Um dos jogadores está ocupado.",
             ephemeral=True
         )
         return
 
-    nomes = [
-        f"• {jogador.mention}"
-        for jogador in marcados
-    ]
-
-    reset_titulo = bool(titulo and titulo.value == "sim")
-    reset_nick = bool(nick and nick.value == "sim")
+    reset_titulo = titulo.value == "sim"
+    reset_nick = nick.value == "sim"
 
     descricao = (
-        f"Você está prestes a resetar **{len(ids_reset)} perfil(s)**.\n"
-        "ELO, Peak, estatísticas e histórico serão apagados.\n"
+        f"Você está prestes a resetar **{len(ids_reset)} perfil(s)**.\\n"
+        "ELO, Peak, estatísticas e histórico serão apagados.\\n"
         f"Nick: **{'será apagado' if reset_nick else 'será mantido'}** • "
-        f"Título: **{'será apagado' if reset_titulo else 'será mantido'}**\n"
+        f"Título: **{'será apagado' if reset_titulo else 'será mantido'}**\\n"
         "Um backup será criado antes."
     )
 
-    if nomes:
-        descricao += "\n\n" + "\n".join(nomes)
+    if jogador is not None and escopo.value == "selected":
+        descricao += f"\\n\\nJogador: {jogador.mention}"
 
     view = ConfirmResetView(
         ids_reset,
         escopo.value,
-        nomes,
+        [],
         interaction.user.id,
         reset_titulo=reset_titulo,
         reset_nick=reset_nick
@@ -3233,10 +3172,7 @@ async def resetar(
         view=view,
         ephemeral=True
     )
-
-    view.message = (
-        await interaction.original_response()
-    )
+    view.message = await interaction.original_response()
 
 
 # ============================================================
