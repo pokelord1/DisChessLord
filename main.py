@@ -1954,6 +1954,43 @@ def registrar_historico(
         dados["history"] = dados["history"][:100]
 
 
+async def excluir_publicacoes_partida_apos_tempo(game, atraso=300):
+    """Apaga as publicações (threads) do Fórum cinco minutos após o fim."""
+    await asyncio.sleep(atraso)
+
+    # Se houve revanche e a mesma mesa está sendo usada, não apagar a partida nova.
+    if game.get("channel_id") in active_games:
+        logging.info(
+            "Limpeza da partida %s cancelada: há uma nova partida nesta mesa.",
+            game.get("id")
+        )
+        return
+
+    canais = {}
+    for message in list(game.get("public_messages", [])):
+        canal = getattr(message, "channel", None)
+        if isinstance(canal, discord.Thread):
+            canais[canal.id] = canal
+
+    for channel_id, thread in canais.items():
+        try:
+            await thread.delete(
+                reason="Publicação de partida encerrada há cinco minutos."
+            )
+            logging.info(
+                "Publicação de Fórum %s removida após o fim da partida %s.",
+                channel_id,
+                game.get("id")
+            )
+        except discord.NotFound:
+            pass
+        except (discord.Forbidden, discord.HTTPException):
+            logging.exception(
+                "Não foi possível apagar a publicação de Fórum %s.",
+                channel_id
+            )
+
+
 def finalizar_partida(game, resultado, motivo):
     if game["finished"]:
         return None
@@ -1962,6 +1999,12 @@ def finalizar_partida(game, resultado, motivo):
         return None
 
     game["finished"] = True
+
+    # Mantém o resultado visível por cinco minutos e depois apaga as
+    # publicações da partida no Fórum (inclusive espelhos entre servidores).
+    asyncio.create_task(
+        excluir_publicacoes_partida_apos_tempo(game, atraso=300)
+    )
 
     white = game["white"]
     black = game["black"]
