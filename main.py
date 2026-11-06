@@ -3204,7 +3204,8 @@ class ChallengeView(discord.ui.View):
             await interaction.response.edit_message(
                 content=None,
                 embed=criar_embed_partida(game),
-                view=view
+                view=view,
+                attachments=[criar_arquivo_tabuleiro(game)]
             )
 
     @discord.ui.button(
