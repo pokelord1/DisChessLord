@@ -4196,153 +4196,285 @@ async def ranking(interaction):
 
 
 # ============================================================
-# 20. HISTÓRICO
+# 20. HISTÓRICO E PGN
 # ============================================================
 
-@bot.tree.command(
-    name="historico",
-    description="Veja as partidas recentes de um jogador."
-)
-@app_commands.describe(
-    jogador="Jogador cujo histórico deseja consultar"
-)
-async def historico(
-    interaction,
-    jogador: discord.Member = None
-):
-    jogador = jogador or interaction.user
-
-    dados = obter_dados_usuario(jogador.id)
-
-    partidas = dados["history"]
-
-    if not partidas:
-        await interaction.response.send_message(
-            "Esse jogador ainda não possui partidas.",
-            ephemeral=True
-        )
-        return
-
+def montar_embed_historico(jogador, partidas, pagina):
+    total = max(1, (len(partidas) + 9) // 10)
+    pagina = max(0, min(pagina, total - 1))
     linhas = []
-
-    for partida in partidas[:10]:
-
-        if int(partida["white"]) == jogador.id:
-            adversario_id = int(partida["black"])
-            resultado = partida["result"]
-
-            if resultado == "1-0":
-                situacao = "Vitória"
-            elif resultado == "0-1":
-                situacao = "Derrota"
-            else:
-                situacao = "Empate"
-
-            delta = partida["white_delta"]
-
+    for p in partidas[pagina * 10:(pagina + 1) * 10]:
+        uid = int(jogador.id)
+        brancas, pretas = int(p["white"]), int(p["black"])
+        resultado = p.get("result", "*")
+        if brancas == uid:
+            adversario, delta = pretas, int(p.get("white_delta", 0))
+            situacao = "Vitória" if resultado == "1-0" else ("Derrota" if resultado == "0-1" else "Empate")
         else:
-            adversario_id = int(partida["white"])
-            resultado = partida["result"]
-
-            if resultado == "0-1":
-                situacao = "Vitória"
-            elif resultado == "1-0":
-                situacao = "Derrota"
-            else:
-                situacao = "Empate"
-
-            delta = partida["black_delta"]
-
-        nome = nome_jogador(adversario_id, interaction.guild)
-
-        linhas.append(
-            f"**{situacao}** contra {nome} "
-            f"— {delta:+} ELO\n"
-            f"Partida **#{numero_exibicao_partida(partida['id'])}**"
-        )
-
-    embed = discord.Embed(
-        title=f"📜 Histórico de {jogador.display_name}",
-        description="\n".join(linhas),
-        color=discord.Color.blurple()
-    )
-
-    await interaction.response.send_message(
-        embed=embed
-    )
+            adversario, delta = brancas, int(p.get("black_delta", 0))
+            situacao = "Vitória" if resultado == "0-1" else ("Derrota" if resultado == "1-0" else "Empate")
+        linhas.append(f"**#{numero_exibicao_partida(p['id'])} — {situacao}** contra **{nome_jogador(adversario)}** ({delta:+} ELO) • {resultado}")
+    embed = discord.Embed(title=f"📜 Histórico de {nome_jogador(jogador.id)}",
+                          description="\n".join(linhas) or "Nenhuma partida nesta página.",
+                          color=discord.Color.blurple())
+    embed.set_footer(text=f"Página {pagina + 1}/{total} • {len(partidas)} partida(s)")
+    return embed, pagina, total
 
 
-# ============================================================
-# 21. ANALISAR
-# ============================================================
+class HistoricoPartidasView(discord.ui.View):
+    def __init__(self, owner_id, jogador, partidas, pagina=0):
+        super().__init__(timeout=180)
+        self.owner_id, self.jogador, self.partidas, self.pagina = owner_id, jogador, partidas, pagina
+        self.total = max(1, (len(partidas) + 9) // 10)
+        self.atualizar_botoes()
 
-@bot.tree.command(
-    name="analisar",
-    description="Veja o PGN de uma partida."
-)
-@app_commands.describe(
-    numero_partida="Número sequencial da partida (opcional; vazio = mais recente)"
-)
-async def analisar(
-    interaction,
-    numero_partida: app_commands.Range[int, 1, 1000000] = None
-):
-    dados = obter_dados_usuario(
-        interaction.user.id
-    )
+    def atualizar_botoes(self):
+        self.anterior.disabled = self.pagina <= 0
+        self.proxima.disabled = self.pagina >= self.total - 1
 
-    partidas = dados["history"]
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Este histórico pertence a outro usuário.", ephemeral=True)
+            return False
+        return True
 
+    async def mudar(self, interaction, delta):
+        self.pagina = max(0, min(self.total - 1, self.pagina + delta))
+        self.atualizar_botoes()
+        embed, _, _ = montar_embed_historico(self.jogador, self.partidas, self.pagina)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Anterior", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def anterior(self, interaction, button):
+        await self.mudar(interaction, -1)
+
+    @discord.ui.button(label="Próxima", emoji="▶️", style=discord.ButtonStyle.primary)
+    async def proxima(self, interaction, button):
+        await self.mudar(interaction, 1)
+
+
+historico_group = app_commands.Group(name="historico", description="Consulte partidas e arquivos PGN.")
+
+@historico_group.command(name="partidas", description="Veja as partidas do histórico com paginação.")
+@app_commands.describe(jogador="Jogador cujo histórico deseja consultar", pagina="Número da página")
+async def historico_partidas(interaction, jogador: discord.Member = None,
+                             pagina: app_commands.Range[int, 1, 1000] = 1):
+    jogador = jogador or interaction.user
+    partidas = list(obter_dados_usuario(jogador.id).get("history", []))
     if not partidas:
-        await interaction.response.send_message(
-            "Você ainda não possui partidas.",
-            ephemeral=True
-        )
+        await interaction.response.send_message("Esse jogador ainda não possui partidas.", ephemeral=True)
         return
+    partidas.sort(key=lambda x: numero_exibicao_partida(x.get("id")), reverse=True)
+    pagina = min(pagina - 1, max(0, (len(partidas) - 1) // 10))
+    view = HistoricoPartidasView(interaction.user.id, jogador, partidas, pagina)
+    embed, _, _ = montar_embed_historico(jogador, partidas, pagina)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    partida = None
 
-    if numero_partida is not None:
-        for item in partidas:
-            if numero_exibicao_partida(item.get("id")) == numero_partida:
-                partida = item
-                break
-    else:
-        partida = partidas[0]
-
-    if not partida:
-        await interaction.response.send_message(
-            "Partida não encontrada.",
-            ephemeral=True
-        )
-        return
-
-    pgn = partida.get("pgn", "")
-
+@historico_group.command(name="pgn", description="Receba o arquivo PGN de uma partida.")
+@app_commands.describe(numero="Número sequencial da partida", jogador="Jogador dono da partida")
+async def historico_pgn(interaction, numero: app_commands.Range[int, 1, 1000000],
+                        jogador: discord.Member = None):
+    jogador = jogador or interaction.user
+    partidas = obter_dados_usuario(jogador.id).get("history", [])
+    partida = next((x for x in partidas if numero_exibicao_partida(x.get("id")) == numero), None)
+    pgn = str(partida.get("pgn") or "").strip() if partida else ""
     if not pgn:
-        await interaction.response.send_message(
-            "Essa partida não possui PGN.",
-            ephemeral=True
-        )
+        await interaction.response.send_message("Partida não encontrada ou sem PGN salvo.", ephemeral=True)
         return
+    arquivo = discord.File(io.BytesIO(pgn.encode("utf-8")), filename=f"partida_{numero}.pgn")
+    await interaction.response.send_message(f"PGN da partida #{numero}:", file=arquivo, ephemeral=True)
 
-    if len(pgn) > 1800:
-        pgn = pgn[:1800] + "\n... (reduzido)"
+bot.tree.add_command(historico_group)
 
-    embed = discord.Embed(
-        title=f"♟️ PGN da partida #{numero_exibicao_partida(partida['id'])}",
-        description=(
-            f"Resultado: **{partida['result']}**\n"
-            f"Motivo: **{partida['reason']}**\n\n"
-            f"```pgn\n{pgn}\n```"
-        ),
-        color=discord.Color.blurple()
-    )
 
-    await interaction.response.send_message(
-        embed=embed,
-        ephemeral=True
-    )
+# ============================================================
+# 21. ANÁLISE DE PGN COM STOCKFISH
+# ============================================================
+
+STOCKFISH_PATH = os.getenv("STOCKFISH_PATH", "stockfish")
+ANALISE_TEMPO_POR_LANCE = 0.08
+ANALISE_MAX_LANCES = 160
+PRECISAO_GAMMA = 120.0
+stockfish_lock = asyncio.Lock()
+
+
+def abrir_pgn(texto):
+    try:
+        jogo = chess.pgn.read_game(io.StringIO(texto.strip()))
+        if jogo is None:
+            return None, "Não consegui interpretar esse PGN."
+        if jogo.errors:
+            return None, "O PGN contém erros: " + "; ".join(str(x) for x in jogo.errors[:3])
+        return jogo, None
+    except Exception as erro:
+        return None, f"PGN inválido: {erro}"
+
+
+def analisar_pgn_stockfish(texto):
+    jogo, erro = abrir_pgn(texto)
+    if erro:
+        return None, erro
+    try:
+        engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+    except (FileNotFoundError, OSError, chess.engine.EngineError) as exc:
+        return None, ("Stockfish não está instalado ou não foi encontrado. Configure STOCKFISH_PATH "
+                      "com o caminho do executável na hospedagem. Detalhe: " + str(exc))
+    resultados = []
+    board = jogo.board()
+    try:
+        movimentos = list(jogo.mainline_moves())
+        if len(movimentos) > ANALISE_MAX_LANCES:
+            return None, f"Esta análise aceita até {ANALISE_MAX_LANCES} lances."
+        with stockfish_lock:
+            for indice, movimento in enumerate(movimentos):
+                lado = board.turn
+                san = board.san(movimento)
+                try:
+                    melhor_info = engine.analyse(board, chess.engine.Limit(time=ANALISE_TEMPO_POR_LANCE),
+                                                 info=chess.engine.INFO_SCORE | chess.engine.INFO_PV)
+                    melhor_lance = melhor_info.get("pv", [None])[0]
+                    antes_score = melhor_info["score"].pov(lado)
+                    antes = (100000 if antes_score.mate() and antes_score.mate() > 0 else -100000) if antes_score.is_mate() else (antes_score.score(mate_score=100000) or 0)
+                    board.push(movimento)
+                    depois_score = engine.analyse(board, chess.engine.Limit(time=ANALISE_TEMPO_POR_LANCE))["score"].pov(lado)
+                    depois = (100000 if depois_score.mate() and depois_score.mate() > 0 else -100000) if depois_score.is_mate() else (depois_score.score(mate_score=100000) or 0)
+                    perda = max(0, int(antes - depois))
+                    if melhor_lance == movimento and perda <= 15:
+                        classe = "Melhor"
+                    elif perda <= 20:
+                        classe = "Ótimo"
+                    elif perda <= 60:
+                        classe = "Bom"
+                    elif perda <= 120:
+                        classe = "Imprecisão"
+                    elif perda <= 250:
+                        classe = "Erro"
+                    else:
+                        classe = "Erro grave"
+                    resultados.append({"indice": indice + 1, "san": san, "brancas": lado == chess.WHITE,
+                                       "classificacao": classe, "perda": perda})
+                except (chess.engine.EngineError, ValueError):
+                    if board.peek() != movimento if board.move_stack else True:
+                        board.push(movimento)
+                    resultados.append({"indice": indice + 1, "san": san, "brancas": lado == chess.WHITE,
+                                       "classificacao": "Sem avaliação", "perda": None})
+    except Exception as exc:
+        logging.exception("Erro na análise Stockfish.")
+        return None, f"Falha durante a análise: {exc}"
+    finally:
+        try:
+            engine.quit()
+        except Exception:
+            pass
+
+    for cor in (True, False):
+        lances = [x for x in resultados if x["brancas"] == cor and x["perda"] is not None]
+        precisao = None
+        if lances:
+            media = sum(min(x["perda"], 1000) for x in lances) / len(lances)
+            precisao = max(0.0, min(100.0, 100 * math.exp(-media / PRECISAO_GAMMA)))
+        for item in resultados:
+            if item["brancas"] == cor:
+                item["precisao"] = precisao
+    return {"game": jogo, "moves": resultados}, None
+
+
+def embed_lance_analise(dados, indice):
+    jogo, movimentos = dados["game"], dados["moves"]
+    board = jogo.board()
+    for move in list(jogo.mainline_moves())[:indice]:
+        board.push(move)
+    if indice == 0:
+        titulo, linhas = "Posição inicial", []
+    else:
+        item = movimentos[indice - 1]
+        perda = "—" if item["perda"] is None else f"{item['perda']} cp"
+        titulo = f"Lance {item['indice']}: {item['san']}"
+        linhas = [f"**Avaliação:** {item['classificacao']} • perda estimada: {perda}"]
+    branca = next((x["precisao"] for x in movimentos if x["brancas"] and x["precisao"] is not None), None)
+    preta = next((x["precisao"] for x in movimentos if not x["brancas"] and x["precisao"] is not None), None)
+    if branca is not None and preta is not None:
+        linhas.append(f"**Precisão estimada:** Brancas {branca:.1f}% • Pretas {preta:.1f}%")
+    embed = discord.Embed(title=f"♟️ Análise — {titulo}", description="\n".join(linhas) or "Use os botões para navegar pelos lances.",
+                          color=discord.Color.blurple())
+    embed.set_footer(text=f"Posição {indice}/{len(movimentos)} • Precisão aproximada, não oficial")
+    return embed, board
+
+
+class AnalisePGNView(discord.ui.View):
+    def __init__(self, owner_id, dados):
+        super().__init__(timeout=300)
+        self.owner_id, self.dados, self.indice = owner_id, dados, 0
+        self.total = len(dados["moves"])
+        self.atualizar_botoes()
+
+    def atualizar_botoes(self):
+        self.voltar.disabled = self.indice <= 0
+        self.avancar.disabled = self.indice >= self.total
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Esta análise pertence a outro usuário.", ephemeral=True)
+            return False
+        return True
+
+    async def mudar(self, interaction, delta):
+        self.indice = max(0, min(self.total, self.indice + delta))
+        self.atualizar_botoes()
+        embed, board = embed_lance_analise(self.dados, self.indice)
+        buffer = io.BytesIO()
+        gerar_imagem_tabuleiro({"board": board, "moves": list(board.move_stack)}).save(buffer, format="PNG")
+        buffer.seek(0)
+        await interaction.response.edit_message(embed=embed,
+            attachments=[discord.File(buffer, filename="analise_tabuleiro.png")], view=self)
+
+    @discord.ui.button(label="Voltar", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def voltar(self, interaction, button):
+        await self.mudar(interaction, -1)
+
+    @discord.ui.button(label="Avançar", emoji="▶️", style=discord.ButtonStyle.primary)
+    async def avancar(self, interaction, button):
+        await self.mudar(interaction, 1)
+
+
+async def enviar_analise(interaction, pgn):
+    dados, erro = await asyncio.to_thread(analisar_pgn_stockfish, pgn)
+    if erro:
+        await interaction.followup.send(erro, ephemeral=True)
+        return
+    view = AnalisePGNView(interaction.user.id, dados)
+    embed, board = embed_lance_analise(dados, 0)
+    buffer = io.BytesIO()
+    gerar_imagem_tabuleiro({"board": board, "moves": []}).save(buffer, format="PNG")
+    buffer.seek(0)
+    await interaction.followup.send(embed=embed,
+        file=discord.File(buffer, filename="analise_tabuleiro.png"), view=view, ephemeral=True)
+
+
+class ColarPGNModal(discord.ui.Modal, title="Analisar partida"):
+    pgn = discord.ui.TextInput(label="Cole o PGN completo", style=discord.TextStyle.paragraph,
+                                placeholder='[Event "..."] ...', max_length=4000)
+
+    async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await enviar_analise(interaction, self.pgn.value)
+
+
+@bot.tree.command(name="analisar", description="Analise um PGN ou uma partida do seu histórico.")
+@app_commands.describe(numero_partida="Número da partida; deixe vazio para colar um PGN")
+async def analisar(interaction, numero_partida: app_commands.Range[int, 1, 1000000] = None):
+    if numero_partida is None:
+        await interaction.response.send_modal(ColarPGNModal())
+        return
+    partidas = obter_dados_usuario(interaction.user.id).get("history", [])
+    partida = next((x for x in partidas if numero_exibicao_partida(x.get("id")) == numero_partida), None)
+    pgn = str(partida.get("pgn") or "").strip() if partida else ""
+    if not pgn:
+        await interaction.response.send_message("Partida não encontrada ou sem PGN salvo.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    await enviar_analise(interaction, pgn)
 
 
 # ============================================================
