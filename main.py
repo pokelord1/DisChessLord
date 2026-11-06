@@ -5333,6 +5333,14 @@ async def historico_torneio(interaction):
     await interaction.response.send_message(embed=embed)
 
 
+@bot.tree.command(
+    name="torneio",
+    description="Veja os torneios ativos do servidor."
+)
+async def torneio(interaction):
+    await torneios(interaction)
+
+
 # ============================================================
 # 31. INSCRIÇÃO EM TORNEIOS
 # ============================================================
