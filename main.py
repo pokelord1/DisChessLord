@@ -18,6 +18,11 @@ import chess
 import chess.pgn
 from supabase import create_client, Client
 
+# Configuração de Intents e Inicialização do Bot
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
 # Conexão com o Supabase (lê as variáveis configuradas na FadeHost)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -62,7 +67,7 @@ async def cmd_saldo(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ============================================================
+============================================================
 # 1. CONFIGURAÇÃO
 # ============================================================
 
