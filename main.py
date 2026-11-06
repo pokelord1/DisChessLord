@@ -3003,6 +3003,15 @@ class ChallengeView(discord.ui.View):
                 )
                 return
 
+            if not usuario_tem_nick(self.challenger) or not usuario_tem_nick(self.opponent):
+                await interaction.response.send_message(
+                    "você ainda não tem um nick, use /nick para escolher seu nome"
+                    if not usuario_tem_nick(interaction.user.id)
+                    else "O outro jogador ainda não tem um nick e precisa usar /nick antes de jogar.",
+                    ephemeral=True
+                )
+                return
+
             if (
                 jogador_em_jogo(self.challenger)
                 or jogador_em_jogo(self.opponent)
