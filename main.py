@@ -4616,8 +4616,8 @@ class JogadorTituloModal(discord.ui.Modal):
         self.owner_id = owner_id
 
         self.user_id_input = discord.ui.TextInput(
-            label="ID do jogador",
-            max_length=25
+            label="Nome ou menção do jogador",
+            max_length=100
         )
 
         self.titulo_input = discord.ui.TextInput(
@@ -4648,6 +4648,7 @@ class JogadorTituloModal(discord.ui.Modal):
             )
             return
 
+        user_id = membro.id
         dados = obter_dados_usuario(user_id)
         anterior = copiar_json(dados)
 
@@ -4975,7 +4976,7 @@ class CriarEventoModal(discord.ui.Modal):
         await interaction.response.send_message(
             embed=embed_sucesso(
                 f"Evento **{evento['name']}** criado e aguardando início.\n"
-                f"ID: `{evento_id}`\n"
+                
                 f"Duração: {horas} horas. A cobrança será feita ao iniciar."
             ),
             ephemeral=False
@@ -5770,8 +5771,8 @@ class PecaIdModal(discord.ui.Modal):
         self.acao = acao
 
         self.peca_id = discord.ui.TextInput(
-            label="ID da peça",
-            max_length=12
+            label="Nome exato da peça",
+            max_length=40
         )
 
         self.add_item(self.peca_id)
@@ -5803,10 +5804,6 @@ class PecaIdModal(discord.ui.Modal):
             )
 
             embed.add_field(
-                name="ID",
-                value=peca_id
-            )
-
             embed.add_field(
                 name="Método",
                 value=peca["method"]
@@ -5865,7 +5862,7 @@ class PecaIdModal(discord.ui.Modal):
                 return
 
             await interaction.response.send_message(
-                f"Peça duplicada. Novo ID: `{novo_id}`",
+                f"Peça **{nova['name']}** duplicada com sucesso.",
                 ephemeral=True
             )
             return
