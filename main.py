@@ -3389,31 +3389,42 @@ async def iniciar_sala(interaction, sala_id):
             [sala["owner"], jogador], 2
         )
 
-        # O tabuleiro principal é publicado no servidor de quem começa.
-        # Se for o criador, reutiliza o Fórum da publicação original;
-        # se for quem aceitou, usa o Fórum do servidor atual.
+        # No mesmo servidor, a própria publicação da sala vira o tabuleiro.
+        # Entre servidores, criamos uma publicação no servidor de quem começa
+        # e mantemos a publicação original como espelho.
+        thread_original = sala.get("thread")
+        sala_message = sala.get("message")
+        guild_original_id = getattr(
+            getattr(thread_original, "guild", None), "id", None
+        )
+        mesma_guild = guild_original_id == interaction.guild_id
+
         forum_partida = forum_atual
         if brancas == sala["owner"]:
-            thread_original = sala.get("thread")
             forum_original = getattr(thread_original, "parent", None)
             if isinstance(forum_original, discord.ForumChannel):
                 forum_partida = forum_original
 
         try:
-            created = await forum_partida.create_thread(
-                name=sala["name"][:100],
-                content=(
-                    f"♟️ **{sala['name']}** — partida iniciada!\n"
-                    f"⚪ Brancas (começa): <@{brancas}>\n"
-                    f"⚫ Pretas: <@{pretas}>"
+            if mesma_guild and thread_original is not None and sala_message is not None:
+                # Reutiliza exatamente a thread e a mensagem já existentes.
+                partida_thread = thread_original
+                message = sala_message
+            else:
+                created = await forum_partida.create_thread(
+                    name=sala["name"][:100],
+                    content=(
+                        f"♟️ **{sala['name']}** — partida iniciada!\\n"
+                        f"⚪ Brancas (começa): <@{brancas}>\\n"
+                        f"⚫ Pretas: <@{pretas}>"
+                    )
                 )
-            )
-            partida_thread = getattr(created, "thread", None)
-            message = getattr(created, "message", None)
-            if partida_thread is None:
-                partida_thread = created[0]
-            if message is None:
-                message = created[1]
+                partida_thread = getattr(created, "thread", None)
+                message = getattr(created, "message", None)
+                if partida_thread is None:
+                    partida_thread = created[0]
+                if message is None:
+                    message = created[1]
 
             game = criar_partida(brancas, pretas, partida_thread.id, forum_partida.guild.id)
             game["starter"] = brancas
@@ -3422,16 +3433,8 @@ async def iniciar_sala(interaction, sala_id):
             active_games[partida_thread.id] = game
             SALAS_JOGO.pop(sala_id, None)
 
-            # Cada jogador recebe uma cópia interativa pela DM. O Fórum e a
-            # publicação original mostram apenas o tabuleiro, sem controles.
             game["message"] = message
             game["public_messages"] = [message]
-            sala_message = sala.get("message")
-            thread_original = sala.get("thread")
-            guild_original_id = getattr(
-                getattr(thread_original, "guild", None), "id", None
-            )
-            mesma_guild = guild_original_id == partida_thread.guild.id
             if sala_message is not None and not mesma_guild:
                 game["public_messages"].append(sala_message)
 
@@ -3487,20 +3490,7 @@ async def iniciar_sala(interaction, sala_id):
                     attachments=[criar_arquivo_tabuleiro(game)]
                 )
 
-            # Se os dois jogadores forem do mesmo servidor, a publicação antiga
-            # deixa de ser um segundo tabuleiro e vira apenas um aviso de mudança.
-            if sala_message is not None and mesma_guild:
-                try:
-                    await sala_message.edit(
-                        content=(
-                            f"♟️ A partida foi iniciada. O tabuleiro para acompanhar "
-                            f"está em {partida_thread.mention}; para jogar, use a DM "
-                            "enviada pelo DisChessLord."
-                        ),
-                        embed=None,
-                        view=None
-                    )
-                except (discord.Forbidden, discord.HTTPException):
+HTTPException):
                     logging.exception("Falha ao atualizar a publicação original da sala.")
 
             await interaction.response.send_message(
