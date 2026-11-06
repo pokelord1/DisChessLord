@@ -5709,11 +5709,7 @@ class EditarPecaModal(discord.ui.Modal):
             )
             return
 
-        peca_id = str(
-            self.peca_id.value
-        ).strip().upper()
-
-        peca = obter_peca_personalizada(peca_id)
+        peca_id, peca = buscar_peca_por_nome(self.peca_id.value)
 
         if peca is None:
             await interaction.response.send_message(
@@ -5791,11 +5787,7 @@ class PecaIdModal(discord.ui.Modal):
             )
             return
 
-        peca_id = str(
-            self.peca_id.value
-        ).strip().upper()
-
-        peca = obter_peca_personalizada(peca_id)
+        peca_id, peca = buscar_peca_por_nome(self.peca_id.value)
 
         if peca is None:
             await interaction.response.send_message(
@@ -6048,11 +6040,7 @@ class PosicionamentoPecaModal(discord.ui.Modal):
             )
             return
 
-        peca_id = str(
-            self.peca_id.value
-        ).strip().upper()
-
-        peca = obter_peca_personalizada(peca_id)
+        peca_id, peca = buscar_peca_por_nome(self.peca_id.value)
 
         if peca is None:
             await interaction.response.send_message(
