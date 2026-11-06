@@ -4141,7 +4141,7 @@ class AdmDashboardView(discord.ui.View):
     @discord.ui.button(label="Atividade", emoji="📋", style=discord.ButtonStyle.primary, row=1)
     async def atividade(self, interaction, button):
         view = AtividadeAdmView(self.owner_id, self.guild_id)
-        await interaction.response.send_message(embed=view.criar_embed(), view=view, ephemeral=True)
+        await interaction.response.edit_message(embed=view.criar_embed(), view=view)
 
 
 @bot.tree.command(name="adm_dashboard", description="Abre o painel de moderação do servidor.")
