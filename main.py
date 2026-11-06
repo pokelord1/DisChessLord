@@ -17,6 +17,7 @@ from discord.ext import commands
 
 import chess
 import chess.pgn
+from PIL import Image, ImageDraw, ImageFont
 # ============================================================
 # 1. CONFIGURAÇÃO
 # ============================================================
@@ -1635,6 +1636,77 @@ def offsets_cabra():
 # 10. TABULEIRO E PARTIDAS CLÁSSICAS
 # ============================================================
 
+def gerar_imagem_tabuleiro(game):
+    """Renderiza o tabuleiro em PNG, destacando o último lance."""
+    board = game["board"]
+    casa, margem = 84, 42
+    tamanho = casa * 8 + margem * 2
+    imagem = Image.new("RGB", (tamanho, tamanho), "#20242b")
+    desenho = ImageDraw.Draw(imagem)
+    try:
+        fonte = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 58)
+        coords = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
+    except OSError:
+        fonte, coords = ImageFont.load_default(), ImageFont.load_default()
+    claro, escuro = "#f0d9b5", "#779556"
+    selecionada = game.get("selected_square")
+    ultimo_lance = set()
+    if game.get("moves"):
+        try:
+            ultimo = chess.Move.from_uci(game["moves"][-1])
+            ultimo_lance = {ultimo.from_square, ultimo.to_square}
+        except (ValueError, IndexError):
+            pass
+    simbolos = {
+        chess.KING: ("♔", "♚"), chess.QUEEN: ("♕", "♛"),
+        chess.ROOK: ("♖", "♜"), chess.BISHOP: ("♗", "♝"),
+        chess.KNIGHT: ("♘", "♞"), chess.PAWN: ("♙", "♟"),
+    }
+    for rank in range(8):
+        for file_index in range(8):
+            square = chess.square(file_index, 7 - rank)
+            x0, y0 = margem + file_index * casa, margem + rank * casa
+            x1, y1 = x0 + casa, y0 + casa
+            cor = claro if (rank + file_index) % 2 == 0 else escuro
+            if square in ultimo_lance:
+                cor = "#cdd26a" if cor == claro else "#a4b94f"
+            if square == selecionada:
+                cor = "#f6f669"
+            desenho.rectangle((x0, y0, x1, y1), fill=cor)
+            peca = board.piece_at(square)
+            if peca:
+                simbolo = simbolos[peca.piece_type][0 if peca.color else 1]
+                caixa = desenho.textbbox((0, 0), simbolo, font=fonte, stroke_width=1)
+                largura, altura = caixa[2] - caixa[0], caixa[3] - caixa[1]
+                px = x0 + (casa - largura) / 2 - caixa[0]
+                py = y0 + (casa - altura) / 2 - caixa[1] - 2
+                cor_peca = "#fffdf5" if peca.color else "#20242b"
+                contorno = "#20242b" if peca.color else "#f5f1e8"
+                desenho.text((px, py), simbolo, font=fonte, fill=cor_peca,
+                             stroke_width=1, stroke_fill=contorno)
+    for i in range(8):
+        letra = chr(ord("a") + i)
+        x = margem + i * casa + casa / 2
+        caixa = desenho.textbbox((0, 0), letra, font=coords)
+        largura = caixa[2] - caixa[0]
+        desenho.text((x - largura / 2, 12), letra, font=coords, fill="#f0f0f0")
+        desenho.text((x - largura / 2, tamanho - 27), letra, font=coords, fill="#f0f0f0")
+        numero = str(8 - i)
+        y = margem + i * casa + casa / 2
+        caixa = desenho.textbbox((0, 0), numero, font=coords)
+        altura = caixa[3] - caixa[1]
+        desenho.text((12, y - altura / 2), numero, font=coords, fill="#f0f0f0")
+        desenho.text((tamanho - 27, y - altura / 2), numero, font=coords, fill="#f0f0f0")
+    buffer = io.BytesIO()
+    imagem.save(buffer, format="PNG", optimize=True)
+    buffer.seek(0)
+    return buffer
+
+
+def criar_arquivo_tabuleiro(game):
+    return discord.File(gerar_imagem_tabuleiro(game), filename="tabuleiro.png")
+
+
 def desenhar_tabuleiro(board):
     tabuleiro = board.unicode(
         borders=True,
@@ -1650,9 +1722,11 @@ def criar_embed_partida(game):
 
     embed = discord.Embed(
         title="♟️ DisChessLord — Partida em andamento",
-        description=desenhar_tabuleiro(board),
+        description=("Brancas jogam" if board.turn == chess.WHITE else "Pretas jogam"),
         color=discord.Color.blurple()
     )
+
+    embed.set_image(url="attachment://tabuleiro.png")
 
     nome_brancas = nome_jogador(game["white"], bot.get_guild(game.get("guild_id")))
     nome_pretas = nome_jogador(game["black"], bot.get_guild(game.get("guild_id")))
@@ -1990,6 +2064,8 @@ def criar_embed_final(
         color=discord.Color.gold()
     )
 
+    embed.set_image(url="attachment://tabuleiro.png")
+
     if resultado_elo and game.get("elo_enabled", True):
         embed.add_field(
             name="ELO das Brancas",
@@ -2045,10 +2121,15 @@ class ChessBoardView(discord.ui.View):
 
         for square, piece in board.piece_map().items():
             if piece.color == board.turn:
+                nomes_pecas = {
+                    chess.PAWN: "Peão", chess.KNIGHT: "Cavalo",
+                    chess.BISHOP: "Bispo", chess.ROOK: "Torre",
+                    chess.QUEEN: "Dama", chess.KING: "Rei"
+                }
                 pecas.append(
                     discord.SelectOption(
                         label=(
-                            f"{piece.symbol()} — "
+                            f"{nomes_pecas[piece.piece_type]} — "
                             f"{chess.square_name(square)}"
                         ),
                         value=str(square)
@@ -2288,7 +2369,8 @@ class ChessBoardView(discord.ui.View):
             # Sincroniza a seleção nas duas DMs e no tabuleiro público.
             await interaction.response.edit_message(
                 embed=criar_embed_partida(self.game),
-                view=self
+                view=self,
+                attachments=[criar_arquivo_tabuleiro(self.game)]
             )
             await sincronizar_interfaces_partida(self.game)
 
@@ -2321,7 +2403,8 @@ class ChessBoardView(discord.ui.View):
                     await interaction.response.edit_message(
                         content="Escolha a peça da promoção:",
                         embed=criar_embed_partida(self.game),
-                        view=promotion_view
+                        view=promotion_view,
+                        attachments=[criar_arquivo_tabuleiro(self.game)]
                     )
 
                     promotion_view.message = (
@@ -2371,7 +2454,8 @@ class ChessBoardView(discord.ui.View):
 
             await interaction.response.edit_message(
                 embed=criar_embed_partida(self.game),
-                view=self
+                view=self,
+                attachments=[criar_arquivo_tabuleiro(self.game)]
             )
             await sincronizar_interfaces_partida(self.game)
 
@@ -2389,7 +2473,8 @@ class ChessBoardView(discord.ui.View):
 
             await interaction.response.edit_message(
                 embed=criar_embed_partida(self.game),
-                view=self
+                view=self,
+                attachments=[criar_arquivo_tabuleiro(self.game)]
             )
             await sincronizar_interfaces_partida(self.game)
 
@@ -2408,7 +2493,8 @@ class ChessBoardView(discord.ui.View):
 
             await interaction.response.edit_message(
                 embed=criar_embed_partida(self.game),
-                view=self
+                view=self,
+                attachments=[criar_arquivo_tabuleiro(self.game)]
             )
             await sincronizar_interfaces_partida(self.game)
 
@@ -2433,7 +2519,8 @@ class ChessBoardView(discord.ui.View):
 
             await interaction.response.edit_message(
                 embed=criar_embed_partida(self.game),
-                view=self
+                view=self,
+                attachments=[criar_arquivo_tabuleiro(self.game)]
             )
             await sincronizar_interfaces_partida(self.game)
 
@@ -2486,7 +2573,8 @@ class ChessBoardView(discord.ui.View):
             await interaction.response.edit_message(
                 content=None,
                 embed=embed,
-                view=None
+                view=None,
+                attachments=[criar_arquivo_tabuleiro(self.game)]
             )
             await sincronizar_interfaces_partida(self.game, embed=embed, final=True)
 
@@ -2520,7 +2608,8 @@ class ChessBoardView(discord.ui.View):
 
             await interaction.response.edit_message(
                 embed=criar_embed_partida(self.game),
-                view=self
+                view=self,
+                attachments=[criar_arquivo_tabuleiro(self.game)]
             )
             await sincronizar_interfaces_partida(self.game)
 
@@ -2591,7 +2680,8 @@ class PromotionView(discord.ui.View):
                             "Escolha novamente."
                         ),
                         embed=criar_embed_partida(self.game),
-                        view=self.parent_view
+                        view=self.parent_view,
+                        attachments=[criar_arquivo_tabuleiro(self.game)]
                     )
                 except discord.HTTPException:
                     logging.exception(
@@ -2867,7 +2957,10 @@ async def sincronizar_interfaces_partida(game, embed=None, final=False):
     for user_id, message in list(game.get("dm_messages", {}).items()):
         try:
             view = RevancheView(game) if final else ChessBoardView(game)
-            await message.edit(content=None, embed=embed, view=view)
+            await message.edit(
+                content=None, embed=embed, view=view,
+                attachments=[criar_arquivo_tabuleiro(game)]
+            )
         except (discord.Forbidden, discord.HTTPException):
             logging.exception("Falha ao atualizar a DM do jogador %s.", user_id)
 
@@ -2878,7 +2971,10 @@ async def sincronizar_interfaces_partida(game, embed=None, final=False):
     )
     for message in list(game.get("public_messages", [])):
         try:
-            await message.edit(content=aviso, embed=embed, view=None)
+            await message.edit(
+                content=aviso, embed=embed, view=None,
+                attachments=[criar_arquivo_tabuleiro(game)]
+            )
         except (discord.Forbidden, discord.HTTPException):
             logging.exception("Falha ao atualizar o tabuleiro público da partida.")
 
@@ -2928,7 +3024,8 @@ async def atualizar_tabuleiro(
     await interaction.response.edit_message(
         content=None,
         embed=criar_embed_partida(game),
-        view=view
+        view=view,
+        attachments=[criar_arquivo_tabuleiro(game)]
     )
     await sincronizar_interfaces_partida(game)
 
@@ -3341,7 +3438,8 @@ async def iniciar_sala(interaction, sala_id):
                             "Use os botões desta mensagem para jogar."
                         ),
                         embed=dm_embed,
-                        view=ChessBoardView(game)
+                        view=ChessBoardView(game),
+                        file=criar_arquivo_tabuleiro(game)
                     )
             except (discord.Forbidden, discord.HTTPException):
                 for enviada in dm_enviadas.values():
@@ -3356,7 +3454,8 @@ async def iniciar_sala(interaction, sala_id):
                         "Os dois jogadores precisam permitir mensagens diretas do bot."
                     ),
                     embed=dm_embed,
-                    view=None
+                    view=None,
+                    attachments=[criar_arquivo_tabuleiro(game)]
                 )
                 await interaction.response.send_message(
                     "Não consegui enviar o tabuleiro por DM. Verifiquem se ambos permitem mensagens diretas do servidor e tentem novamente.",
@@ -3374,7 +3473,8 @@ async def iniciar_sala(interaction, sala_id):
                 await public_message.edit(
                     content=aviso_publico,
                     embed=dm_embed,
-                    view=None
+                    view=None,
+                    attachments=[criar_arquivo_tabuleiro(game)]
                 )
 
             # Se os dois jogadores forem do mesmo servidor, a publicação antiga
@@ -3649,7 +3749,8 @@ class RevancheView(discord.ui.View):
         await interaction.response.edit_message(
             content="🔁 Revanche aceita! A nova partida começou. Joguem pela DM.",
             embed=embed,
-            view=ChessBoardView(game)
+            view=ChessBoardView(game),
+            attachments=[criar_arquivo_tabuleiro(game)]
         )
         game["dm_messages"][int(interaction.user.id)] = interaction.message
 
@@ -3660,7 +3761,8 @@ class RevancheView(discord.ui.View):
                 await message.edit(
                     content="🔁 Revanche aceita! A nova partida começou. Joguem pela DM.",
                     embed=embed,
-                    view=ChessBoardView(game)
+                    view=ChessBoardView(game),
+                    attachments=[criar_arquivo_tabuleiro(game)]
                 )
             except (discord.Forbidden, discord.HTTPException):
                 logging.exception("Falha ao reiniciar a DM da revanche do jogador %s.", uid)
