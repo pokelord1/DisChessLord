@@ -703,6 +703,91 @@ def salvar_admin():
 
 
 # ============================================================
+# PREÇOS AUTOMÁTICOS DE CARGOS PARA PREMIAÇÕES
+# ============================================================
+
+NOMES_CARGOS_ADMIN_EXCLUIDOS = {
+    "adm", "admin", "administrator", "administrador",
+    "administradora", "equipe adm", "equipe admin",
+    "equipe administrativa", "staff adm"
+}
+
+# O preço considera a permissão de maior valor encontrada.
+# Permissões não listadas ficam na categoria básica.
+PRECOS_AUTOMATICOS_CARGOS = [
+    (2000, ("manage_guild", "manage_roles", "manage_channels")),
+    (1500, ("ban_members", "kick_members", "moderate_members")),
+    (800, (
+        "manage_messages", "manage_webhooks", "manage_events",
+        "mention_everyone", "manage_nicknames", "manage_threads",
+        "mute_members", "deafen_members", "move_members"
+    )),
+    (400, (
+        "view_audit_log", "manage_emojis", "manage_emojis_and_stickers",
+        "manage_stickers", "create_guild_expressions",
+        "manage_guild_expressions", "create_events",
+        "send_tts_messages"
+    )),
+    (200, (
+        "bypass_slowmode", "use_external_emojis",
+        "use_external_stickers", "send_messages_in_threads",
+        "create_public_threads", "create_private_threads",
+        "add_reactions", "embed_links", "attach_files"
+    )),
+]
+
+
+def cargo_eh_excluido_da_premiacao(cargo):
+    """Patentes, cargos administrativos e cargos com administrador não podem ser prêmio."""
+    if cargo is None or cargo.is_default() or cargo.managed:
+        return True
+
+    nome = " ".join(str(cargo.name).split()).casefold()
+    if nome in {n.casefold() for n in PATENTES_NOMES}:
+        return True
+    if nome in NOMES_CARGOS_ADMIN_EXCLUIDOS:
+        return True
+    if nome == "lenda do xadrez":
+        return True
+
+    permissoes = cargo.permissions
+    if permissoes.administrator:
+        return True
+
+    return False
+
+
+def preco_automatico_cargo(cargo):
+    """Retorna preço fixo conforme a permissão mais relevante do cargo."""
+    if cargo_eh_excluido_da_premiacao(cargo):
+        return None
+
+    permissoes = cargo.permissions
+    for preco, nomes_permissoes in PRECOS_AUTOMATICOS_CARGOS:
+        if any(getattr(permissoes, nome, False) for nome in nomes_permissoes):
+            return preco
+
+    return 100
+
+
+def obter_preco_cargo_premiacao(guild_id, cargo):
+    """Prioriza preço manual; se não existir, usa a tabela automática."""
+    if cargo_eh_excluido_da_premiacao(cargo):
+        return None
+
+    tabela = (
+        admin_data.setdefault("settings", {})
+        .setdefault("role_prices", {})
+        .get(str(guild_id), {})
+    )
+    configurado = tabela.get(str(cargo.id))
+    if configurado is not None:
+        return max(0, int(configurado))
+
+    return preco_automatico_cargo(cargo)
+
+
+# ============================================================
 # 5. ELO E PATENTES
 # ============================================================
 
@@ -3756,7 +3841,13 @@ class PrecoCargoModal(discord.ui.Modal):
                 return
             role = encontrados[0]
             price = int(str(self.price.value).strip())
-            if role is None or role.is_default() or role.managed or price < 0 or price > 1000000000:
+            if cargo_eh_excluido_da_premiacao(role):
+                await interaction.response.send_message(
+                    "Esse cargo não pode ser usado como premiação (patentes, cargos administrativos ou cargo com permissão de Administrador).",
+                    ephemeral=True
+                )
+                return
+            if price < 0 or price > 1000000000:
                 raise ValueError
             bot_member = interaction.guild.me
             if role >= interaction.user.top_role or bot_member is None or role >= bot_member.top_role:
