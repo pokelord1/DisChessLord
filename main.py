@@ -3340,18 +3340,30 @@ class SorteioCriarModal(discord.ui.Modal):
         except ValueError:
             await interaction.response.send_message("O custo deve ser de 1 a 100 tickets.", ephemeral=True)
             return
+        if interaction.guild is None or not autorizado_adm(interaction):
+            await interaction.response.send_message("Somente a equipe de administração pode criar sorteios.", ephemeral=True)
+            return
+        dados_admin = obter_dados_usuario(interaction.user.id)
+        saldo_tickets = int(dados_admin.get("command_tickets", 0))
+        if saldo_tickets < 1:
+            await interaction.response.send_message("Você precisa de 1 ticket administrativo para criar um sorteio. Peça ao desenvolvedor para distribuir tickets.", ephemeral=True)
+            return
         rid = gerar_id()
         admin_data.setdefault("raffles", {})[rid] = {
             "id": rid, "name": str(self.nome.value).strip(),
-            "prize": str(self.premio.value).strip(), "ticket_cost": custo,
+            "prize": str(self.premio.value).strip(), "ticket_cost": 0,
             "status": "aberto", "entries": {}, "created_at": data_iso(),
-            "guild_id": interaction.guild_id, "channel_id": interaction.channel_id
+            "guild_id": interaction.guild_id, "channel_id": interaction.channel_id,
+            "created_by": interaction.user.id
         }
-        if not salvar_admin():
+        dados_admin["command_tickets"] = saldo_tickets - 1
+        if not salvar_dados() or not salvar_admin():
+            dados_admin["command_tickets"] = saldo_tickets
             admin_data["raffles"].pop(rid, None)
-            await interaction.response.send_message("Falha ao salvar o sorteio.", ephemeral=True)
+            salvar_dados()
+            await interaction.response.send_message("Falha ao salvar o sorteio; ticket devolvido.", ephemeral=True)
             return
-        await interaction.response.send_message(f"🎟️ Sorteio **{self.nome.value}** criado. ID: `{rid}`", ephemeral=True)
+        await interaction.response.send_message(f"🎟️ Sorteio **{self.nome.value}** criado! Foi usado 1 ticket administrativo. Restam **{saldo_tickets - 1}**.", ephemeral=True)
 
 
 class TicketsModal(discord.ui.Modal):
@@ -3374,6 +3386,14 @@ class TicketsModal(discord.ui.Modal):
         except ValueError:
             await interaction.response.send_message("ID ou quantidade inválida.", ephemeral=True)
             return
+        member = interaction.guild.get_member(uid) if interaction.guild else None
+        if member is None or not autorizado_adm(interaction) or not (
+            member.guild_permissions.administrator
+            or member.guild_permissions.manage_guild
+            or member.guild_permissions.moderate_members
+        ):
+            await interaction.response.send_message("Tickets administrativos só podem ser entregues a membros da equipe de moderação/administração.", ephemeral=True)
+            return
         dados = obter_dados_usuario(uid)
         anterior = int(dados.get("command_tickets", 0))
         dados["command_tickets"] = anterior + qtd
@@ -3381,7 +3401,7 @@ class TicketsModal(discord.ui.Modal):
             dados["command_tickets"] = anterior
             await interaction.response.send_message("Falha ao salvar; saldo restaurado.", ephemeral=True)
             return
-        await interaction.response.send_message(f"✅ {qtd} ticket(s) entregues ao usuário `{uid}`. Saldo: **{anterior + qtd}**.", ephemeral=True)
+        await interaction.response.send_message(f"✅ {qtd} ticket(s) administrativos entregues a {member.mention}. Saldo: **{anterior + qtd}**.", ephemeral=True)
 
 
 class DevRafflesView(discord.ui.View):
@@ -3523,39 +3543,25 @@ async def sorteios(interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="participar_sorteio", description="Use seus tickets para entrar em um sorteio.")
-@app_commands.describe(nome_sorteio="Nome do sorteio aberto")
+@bot.tree.command(name="participar_sorteio", description="Entre em um sorteio aberto.")
+@app_commands.describe(nome_sorteio="Nome exato do sorteio")
 async def participar_sorteio(interaction, nome_sorteio: str):
     nome = " ".join(nome_sorteio.strip().split()).casefold()
     encontrados = [x for x in admin_data.setdefault("raffles", {}).values()
                    if x.get("status") == "aberto" and x.get("guild_id") == interaction.guild_id
                    and " ".join(str(x.get("name", "")).split()).casefold() == nome]
     if len(encontrados) != 1:
-        await interaction.response.send_message("Sorteio não encontrado ou nome duplicado. Confira /sorteios e use o nome exato.", ephemeral=True)
+        await interaction.response.send_message("Sorteio não encontrado ou nome duplicado. Confira /sorteios.", ephemeral=True)
         return
     raffle = encontrados[0]
-    dados = obter_dados_usuario(interaction.user.id)
-    custo = int(raffle.get("ticket_cost", 1))
-    saldo = int(dados.get("command_tickets", 0))
-    if saldo < custo:
-        await interaction.response.send_message(f"Você precisa de {custo} ticket(s). Seu saldo: {saldo}.", ephemeral=True)
-        return
-    anterior = saldo
-    dados["command_tickets"] = saldo - custo
     entradas = raffle.setdefault("entries", {})
-    entradas[str(interaction.user.id)] = int(entradas.get(str(interaction.user.id), 0)) + 1
-    if not salvar_dados():
-        dados["command_tickets"] = anterior
-        entradas[str(interaction.user.id)] -= 1
-        await interaction.response.send_message("Falha ao salvar seus tickets.", ephemeral=True)
-        return
+    uid = str(interaction.user.id)
+    entradas[uid] = int(entradas.get(uid, 0)) + 1
     if not salvar_admin():
-        dados["command_tickets"] = anterior
-        entradas[str(interaction.user.id)] -= 1
-        salvar_dados()
-        await interaction.response.send_message("Falha ao salvar a inscrição; tickets devolvidos.", ephemeral=True)
+        entradas[uid] -= 1
+        await interaction.response.send_message("Não foi possível registrar sua participação.", ephemeral=True)
         return
-    await interaction.response.send_message(f"🎟️ Você entrou em **{raffle['name']}**! Entradas: {entradas[str(interaction.user.id)]}. Tickets restantes: {dados['command_tickets']}.", ephemeral=True)
+    await interaction.response.send_message(f"🎟️ Você entrou em **{raffle['name']}**! Boa sorte.", ephemeral=True)
 
 
 
@@ -5872,7 +5878,7 @@ async def help_command(interaction):
                           description="Comandos disponíveis organizados por categoria.",
                           color=discord.Color.blurple())
     embed.add_field(name="♟️ Comandos normais",
-        value="\`/desafiar\` — desafiar jogador\n\`/nick\` — definir nick\n\`/perfil\` — consultar perfil\n\`/ranking\` — ranking de ELO\n\`/historico\` — histórico de partidas\n\`/analisar\` — ver PGN\n\`/saldo\` — saldo de ChessCoins\n\`/eventos\` — eventos ativos\n\`/torneios\` — torneios ativos\n\`/inscrever_torneio\` — inscrever-se\n\`/sorteios\` — sorteios abertos\n\`/participar_sorteio\` — entrar usando tickets", inline=False)
+        value="\`/desafiar\` — desafiar jogador\n\`/nick\` — definir nick\n\`/perfil\` — consultar perfil\n\`/ranking\` — ranking de ELO\n\`/historico\` — histórico de partidas\n\`/analisar\` — ver PGN\n\`/saldo\` — saldo de ChessCoins\n\`/eventos\` — eventos ativos\n\`/torneios\` — torneios ativos\n\`/inscrever_torneio\` — inscrever-se\n\`/sorteios\` — sorteios abertos\n\`/participar_sorteio\` — entrar em sorteio", inline=False)
     embed.add_field(name="🛡️ Comandos administrativos",
         value="\`/adm_dashboard\` — painel de moderação\n\`/limparchat\` — limpar mensagens (dono do servidor)", inline=False)
     embed.add_field(name="⚙️ Comandos de desenvolvedor",
