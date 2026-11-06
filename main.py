@@ -5036,7 +5036,6 @@ class EventoIdModal(discord.ui.Modal):
             )
 
             embed.add_field(
-                 embed.add_field(
                 name="Status",
                 value=evento.get("status", "desconhecido")
             )
