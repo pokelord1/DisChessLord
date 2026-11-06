@@ -3649,6 +3649,15 @@ class DevRafflesView(discord.ui.View):
     async def tickets(self, interaction, button):
         await interaction.response.send_modal(TicketsModal(self.owner_id))
 
+    @discord.ui.button(label="Iniciar sorteio",emoji="▶️",style=discord.ButtonStyle.success)
+    async def iniciar(self,i,b): await i.response.send_modal(GerenciarSorteioModal(self.owner_id,interaction.guild_id,"iniciar"))
+
+    @discord.ui.button(label="Consultar sorteio",emoji="🔎",style=discord.ButtonStyle.primary)
+    async def consultar(self,i,b): await i.response.send_modal(GerenciarSorteioModal(self.owner_id,i.guild_id,"consultar"))
+
+    @discord.ui.button(label="Cancelar sorteio",emoji="🗑️",style=discord.ButtonStyle.secondary)
+    async def cancelar(self,i,b): await i.response.send_modal(GerenciarSorteioModal(self.owner_id,i.guild_id,"cancelar"))
+
     @discord.ui.button(label="Encerrar sorteio", emoji="🔒", style=discord.ButtonStyle.danger)
     async def encerrar(self, interaction, button):
         abertos = [(k, v) for k, v in admin_data.setdefault("raffles", {}).items() if v.get("status") == "aberto"]
@@ -3686,6 +3695,57 @@ class DevRafflesView(discord.ui.View):
         else:
             resultado = "Sorteio encerrado sem participantes."
         await interaction.response.send_message(f"🔒 {resultado} ID: `{rid}`", ephemeral=True)
+
+
+class GerenciarSorteioModal(discord.ui.Modal):
+    def __init__(self,owner_id,guild_id,acao):
+        super().__init__(title="Gerenciar sorteio",timeout=180);self.owner_id=owner_id;self.guild_id=guild_id;self.acao=acao
+        self.ident=discord.ui.TextInput(label="ID do sorteio",max_length=40);self.add_item(self.ident)
+    async def on_submit(self,i):
+        if i.user.id!=self.owner_id or not autorizado_adm(i): await i.response.send_message("Sem autorização.",ephemeral=True);return
+        rid=str(self.ident.value).strip();r=admin_data.setdefault("raffles",{}).get(rid)
+        if not r or str(r.get("guild_id"))!=str(self.guild_id): await i.response.send_message("Sorteio não encontrado.",ephemeral=True);return
+        if self.acao=="consultar":
+            await i.response.send_message(embed=discord.Embed(title=r.get("name","Sorteio"),description=f"ID: {rid}\\nStatus: {r.get('status')}\\nPrêmio: {r.get('prize')}"),ephemeral=True);return
+        old=copiar_json(r)
+        if self.acao=="iniciar":
+            if r.get("status")!="preparacao": await i.response.send_message("Sorteio não está aguardando início.",ephemeral=True);return
+            r.update(status="aberto",started_at=data_iso())
+        elif self.acao=="cancelar": r.update(status="cancelado",cancelled_at=data_iso())
+        elif self.acao=="encerrar":
+            w=[(u,int(n)) for u,n in r.get("entries",{}).items() if int(n)>0];total=sum(n for _,n in w);winner=None
+            if total:
+                pick=secrets.randbelow(total)
+                for uid,n in w:
+                    if pick<n: winner=uid;break
+                    pick-=n
+            r.update(status="encerrado",ended_at=data_iso(),winner_id=winner)
+        if not salvar_admin():
+            r.clear();r.update(old);await i.response.send_message("Falha ao salvar; alteração revertida.",ephemeral=True);return
+        if self.acao=="encerrar" and winner: await i.channel.send(f"🏆 Sorteio **{r['name']}** encerrado! Vencedor: <@{winner}>. Prêmio: {r['prize']}")
+        await i.response.send_message(f"Sorteio {self.acao} concluído.",ephemeral=True)
+
+
+class GerenciarAtividadeView(discord.ui.View):
+    def __init__(self,owner_id,guild_id,tipo):
+        super().__init__(timeout=180);self.owner_id=owner_id;self.guild_id=guild_id;self.tipo=tipo
+    async def interaction_check(self,i):
+        if i.user.id!=self.owner_id or not autorizado_adm(i): await i.response.send_message("Sem autorização.",ephemeral=True);return False
+        return True
+    async def abrir(self,i,acao):
+        cls={"evento":EventoIdModal,"torneio":TorneioIdModal,"sorteio":GerenciarSorteioModal}[self.tipo]
+        await i.response.send_modal(cls(self.owner_id,self.guild_id,acao))
+    @discord.ui.button(label="Iniciar",emoji="▶️",style=discord.ButtonStyle.success)
+    async def iniciar(self,i,b): await self.abrir(i,"iniciar")
+    @discord.ui.button(label="Consultar",emoji="🔎",style=discord.ButtonStyle.primary)
+    async def consultar(self,i,b): await self.abrir(i,"consultar")
+    @discord.ui.button(label="Encerrar",emoji="⏹️",style=discord.ButtonStyle.secondary)
+    async def encerrar(self,i,b): await self.abrir(i,"encerrar")
+    @discord.ui.button(label="Cancelar",emoji="🗑️",style=discord.ButtonStyle.danger)
+    async def cancelar(self,i,b): await self.abrir(i,"cancelar")
+    @discord.ui.button(label="Voltar",emoji="↩️",style=discord.ButtonStyle.secondary,row=1)
+    async def voltar(self,i,b):
+        v=AtividadeAdmView(self.owner_id,self.guild_id);await i.response.edit_message(embed=v.criar_embed(),view=v)
 
 
 class AtividadeAdmView(discord.ui.View):
@@ -3730,11 +3790,21 @@ class AtividadeAdmView(discord.ui.View):
     async def criar_torneio(self, interaction, button):
         await interaction.response.send_modal(CriarTorneioModal(self.owner_id, self.guild_id))
 
-    @discord.ui.button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Gerenciar sorteios",emoji="🎟️",style=discord.ButtonStyle.primary,row=1)
+    async def gerenciar_sorteios(self,i,b):
+        v=GerenciarAtividadeView(self.owner_id,self.guild_id,"sorteio");await i.response.edit_message(embed=discord.Embed(title="🎟️ Gerenciar sorteios",description="Inicie, consulte, encerre ou cancele usando o ID.",color=discord.Color.gold()),view=v)
+    @discord.ui.button(label="Gerenciar eventos",emoji="🎉",style=discord.ButtonStyle.primary,row=1)
+    async def gerenciar_eventos(self,i,b):
+        v=GerenciarAtividadeView(self.owner_id,self.guild_id,"evento");await i.response.edit_message(embed=discord.Embed(title="🎉 Gerenciar eventos",description="Inicie, consulte, encerre ou cancele usando o ID.",color=discord.Color.blurple()),view=v)
+    @discord.ui.button(label="Gerenciar torneios",emoji="🏆",style=discord.ButtonStyle.primary,row=1)
+    async def gerenciar_torneios(self,i,b):
+        v=GerenciarAtividadeView(self.owner_id,self.guild_id,"torneio");await i.response.edit_message(embed=discord.Embed(title="🏆 Gerenciar torneios",description="Inicie, consulte, encerre ou cancele usando o nome exato.",color=discord.Color.gold()),view=v)
+
+    @discord.ui.button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.primary, row=2)
     async def atualizar(self, interaction, button):
         await interaction.response.edit_message(embed=self.criar_embed(), view=self)
 
-    @discord.ui.button(label="Voltar", emoji="↩️", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Voltar", emoji="↩️", style=discord.ButtonStyle.secondary, row=2)
     async def voltar(self, interaction, button):
         await interaction.response.edit_message(
             embed=discord.Embed(title="🛡️ DisChessLord — Painel de moderação",
@@ -4926,6 +4996,9 @@ class EventosAdminView(discord.ui.View):
             )
         )
 
+    @discord.ui.button(label="Iniciar evento",emoji="▶️",style=discord.ButtonStyle.success)
+    async def iniciar(self,i,b): await i.response.send_modal(EventoIdModal(self.owner_id,self.guild_id,"iniciar"))
+
     @discord.ui.button(
         label="Encerrar evento",
         emoji="⏹️",
@@ -5257,6 +5330,9 @@ class TorneiosAdminView(discord.ui.View):
                 "consultar"
             )
         )
+
+    @discord.ui.button(label="Iniciar torneio",emoji="▶️",style=discord.ButtonStyle.success)
+    async def iniciar(self,i,b): await i.response.send_modal(TorneioIdModal(self.owner_id,self.guild_id,"iniciar"))
 
     @discord.ui.button(
         label="Encerrar torneio",
