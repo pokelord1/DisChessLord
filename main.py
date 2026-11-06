@@ -209,8 +209,33 @@ def salvar_json_atomico(caminho, dados):
 def membro_em_guild(guild, user_id):
     if guild is None:
         return None
-
     return guild.get_member(int(user_id))
+
+
+def buscar_membro_por_nome(guild, entrada):
+    if guild is None:
+        return None, "Use este recurso dentro de um servidor."
+    texto = str(entrada or "").strip()
+    if texto.startswith("<@") and texto.endswith(">"):
+        uid = texto.replace("<@", "").replace("!", "").replace(">", "")
+        if uid.isdigit():
+            membro = guild.get_member(int(uid))
+            return (membro, None) if membro else (None, "Membro não encontrado.")
+    chave = " ".join(texto.split()).casefold()
+    encontrados = [m for m in guild.members if chave in {
+        " ".join(str(m.name).split()).casefold(),
+        " ".join(str(m.display_name).split()).casefold()
+    }]
+    if len(encontrados) == 1: return encontrados[0], None
+    if len(encontrados) > 1: return None, "Nome duplicado. Use a menção do Discord."
+    return None, "Membro não encontrado. Informe o nome exato ou mencione o membro."
+
+
+def buscar_peca_por_nome(entrada):
+    chave = " ".join(str(entrada or "").split()).casefold()
+    encontrados = [(pid, p) for pid, p in admin_data.get("pieces", {}).items()
+                   if " ".join(str(p.get("name", "")).split()).casefold() == chave]
+    return encontrados[0] if len(encontrados) == 1 else (None, None)
 
 
 def autorizado_dev(user_id):
@@ -3739,21 +3764,22 @@ class PaymentChoiceView(discord.ui.View):
         super().__init__(timeout=120)
         self.owner_id, self.item, self.tipo = owner_id, item, tipo
         self.pagamento = "coins"
-        self.add_item(discord.ui.Select(
+        self.payment_select = discord.ui.Select(
             placeholder="Escolha como pagar",
             min_values=1, max_values=1,
             options=[
                 discord.SelectOption(label=f"{total:,} ChessCoins", value="coins", description="Paga o custo calculado completo."),
                 discord.SelectOption(label="1 ticket administrativo", value="ticket", description="Um ticket cobre todo o custo.")
             ]
-        ))
-        self.children[0].callback = self.selecionar
+        )
+        self.payment_select.callback = self.selecionar
+        self.add_item(self.payment_select)
 
     async def selecionar(self, interaction):
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message("Este menu pertence a outro administrador.", ephemeral=True)
             return
-        self.pagamento = self.children[0].values[0]
+        self.pagamento = self.payment_select.values[0]
         await interaction.response.defer()
 
     @discord.ui.button(label="Confirmar início", emoji="▶️", style=discord.ButtonStyle.success)
@@ -3838,7 +3864,7 @@ class TicketsModal(discord.ui.Modal):
     def __init__(self, owner_id):
         super().__init__(title="Distribuir tickets", timeout=180)
         self.owner_id = owner_id
-        self.user_id = discord.ui.TextInput(label="ID do usuário", max_length=25)
+        self.user_id = discord.ui.TextInput(label="Nome ou menção do membro", max_length=100)
         self.quantidade = discord.ui.TextInput(label="Quantidade", max_length=6)
         self.add_item(self.user_id)
         self.add_item(self.quantidade)
@@ -3848,13 +3874,17 @@ class TicketsModal(discord.ui.Modal):
             await interaction.response.send_message("Sem autorização.", ephemeral=True)
             return
         try:
-            uid, qtd = int(str(self.user_id.value)), int(str(self.quantidade.value))
+            qtd = int(str(self.quantidade.value))
             if qtd < 1 or qtd > 100000:
                 raise ValueError
         except ValueError:
-            await interaction.response.send_message("ID ou quantidade inválida.", ephemeral=True)
+            await interaction.response.send_message("Quantidade inválida. Use de 1 a 100.000.", ephemeral=True)
             return
-        member = interaction.guild.get_member(uid) if interaction.guild else None
+        member, erro_membro = buscar_membro_por_nome(interaction.guild, self.user_id.value)
+        if erro_membro:
+            await interaction.response.send_message(erro_membro, ephemeral=True)
+            return
+        uid = member.id
         if member is None or not autorizado_adm(interaction) or not (
             member.guild_permissions.administrator
             or member.guild_permissions.manage_guild
@@ -3936,19 +3966,25 @@ class DevRafflesView(discord.ui.View):
             resultado = f"Sorteio encerrado. Vencedor: <@{winner_id}>."
         else:
             resultado = "Sorteio encerrado sem participantes."
-        await interaction.response.send_message(f"🔒 {resultado} ID: `{rid}`", ephemeral=True)
+        await interaction.response.send_message(f"🔒 Sorteio **{raffle['name']}**: {resultado}", ephemeral=True)
 
 
 class GerenciarSorteioModal(discord.ui.Modal):
     def __init__(self,owner_id,guild_id,acao):
         super().__init__(title="Gerenciar sorteio",timeout=180);self.owner_id=owner_id;self.guild_id=guild_id;self.acao=acao
-        self.ident=discord.ui.TextInput(label="ID do sorteio",max_length=40);self.add_item(self.ident)
+        self.ident=discord.ui.TextInput(label="Nome exato do sorteio",max_length=80);self.add_item(self.ident)
     async def on_submit(self,i):
         if i.user.id!=self.owner_id or not autorizado_gestor_atividade(i): await i.response.send_message("Sem autorização.",ephemeral=True);return
-        rid=str(self.ident.value).strip();r=admin_data.setdefault("raffles",{}).get(rid)
-        if not r or str(r.get("guild_id"))!=str(self.guild_id): await i.response.send_message("Sorteio não encontrado.",ephemeral=True);return
+        nome_busca = " ".join(str(self.ident.value).split()).casefold()
+        encontrados = [(rid, item) for rid, item in admin_data.setdefault("raffles", {}).items()
+                       if str(item.get("guild_id")) == str(self.guild_id)
+                       and " ".join(str(item.get("name", "")).split()).casefold() == nome_busca]
+        if len(encontrados) != 1:
+            await i.response.send_message("Sorteio não encontrado ou nome duplicado. Confira a lista e informe o nome exato.", ephemeral=True)
+            return
+        rid, r = encontrados[0]
         if self.acao=="consultar":
-            await i.response.send_message(embed=discord.Embed(title=r.get("name","Sorteio"),description=f"ID: {rid}\\nStatus: {r.get('status')}\\nPrêmio: {r.get('prize')}"),ephemeral=True);return
+            await i.response.send_message(embed=discord.Embed(title=r.get("name","Sorteio"),description=f"Status: {r.get('status')}\\nPrêmio: {r.get('prize')}"),ephemeral=True);return
         old=copiar_json(r)
         if self.acao=="iniciar":
             await enviar_selecao_pagamento(i, r, "sorteio")
