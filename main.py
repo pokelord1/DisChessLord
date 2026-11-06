@@ -9,7 +9,6 @@ import shutil
 import copy
 import math
 import secrets
-import threading
 from datetime import datetime, timezone, timedelta
 
 import discord
@@ -17,7 +16,6 @@ from discord import app_commands
 from discord.ext import commands
 
 import chess
-import chess.engine
 import chess.pgn
 from PIL import Image, ImageDraw, ImageFont
 # ============================================================
@@ -4295,194 +4293,19 @@ async def historico(interaction, acao: app_commands.Choice[str], pagina: app_com
         await interaction.followup.send(f"**PGN #{numero} — continuação {i}/{len(blocos)}**\n{fence}pgn\n{bloco}\n{fence}", ephemeral=True)
 
 # ============================================================
-# 21. ANÁLISE DE PGN COM STOCKFISH
+# 21. COMANDO DE ANÁLISE (TEMPORARIAMENTE INDISPONÍVEL)
 # ============================================================
 
-STOCKFISH_PATH = os.getenv("STOCKFISH_PATH", "stockfish")
-ANALISE_TEMPO_POR_LANCE = 0.08
-ANALISE_MAX_LANCES = 160
-PRECISAO_GAMMA = 120.0
-stockfish_lock = threading.Lock()
-
-
-def abrir_pgn(texto):
-    try:
-        jogo = chess.pgn.read_game(io.StringIO(texto.strip()))
-        if jogo is None:
-            return None, "Não consegui interpretar esse PGN."
-        if jogo.errors:
-            return None, "O PGN contém erros: " + "; ".join(str(x) for x in jogo.errors[:3])
-        return jogo, None
-    except Exception as erro:
-        return None, f"PGN inválido: {erro}"
-
-
-def analisar_pgn_stockfish(texto):
-    jogo, erro = abrir_pgn(texto)
-    if erro:
-        return None, erro
-    try:
-        engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-    except (FileNotFoundError, OSError, chess.engine.EngineError) as exc:
-        return None, ("Stockfish não está instalado ou não foi encontrado. Configure STOCKFISH_PATH "
-                      "com o caminho do executável na hospedagem. Detalhe: " + str(exc))
-    resultados = []
-    board = jogo.board()
-    try:
-        movimentos = list(jogo.mainline_moves())
-        if len(movimentos) > ANALISE_MAX_LANCES:
-            return None, f"Esta análise aceita até {ANALISE_MAX_LANCES} lances."
-        with stockfish_lock:
-            for indice, movimento in enumerate(movimentos):
-                lado = board.turn
-                san = board.san(movimento)
-                try:
-                    melhor_info = engine.analyse(board, chess.engine.Limit(time=ANALISE_TEMPO_POR_LANCE),
-                                                 info=chess.engine.INFO_SCORE | chess.engine.INFO_PV)
-                    melhor_lance = melhor_info.get("pv", [None])[0]
-                    antes_score = melhor_info["score"].pov(lado)
-                    antes = (100000 if antes_score.mate() and antes_score.mate() > 0 else -100000) if antes_score.is_mate() else (antes_score.score(mate_score=100000) or 0)
-                    board.push(movimento)
-                    depois_score = engine.analyse(board, chess.engine.Limit(time=ANALISE_TEMPO_POR_LANCE))["score"].pov(lado)
-                    depois = (100000 if depois_score.mate() and depois_score.mate() > 0 else -100000) if depois_score.is_mate() else (depois_score.score(mate_score=100000) or 0)
-                    perda = max(0, int(antes - depois))
-                    if indice < 12 and melhor_lance == movimento and perda <= 15:
-                        classe = "Livro"
-                    elif melhor_lance == movimento and perda <= 15:
-                        classe = "Melhor"
-                    elif perda <= 20:
-                        classe = "Ótimo"
-                    elif perda <= 60:
-                        classe = "OK"
-                    elif perda <= 120:
-                        classe = "Imprecisão"
-                    elif perda <= 250:
-                        classe = "Erro"
-                    else:
-                        classe = "Erro grave"
-                    resultados.append({"indice": indice + 1, "san": san, "brancas": lado == chess.WHITE,
-                                       "classificacao": classe, "perda": perda})
-                except (chess.engine.EngineError, ValueError):
-                    if not board.move_stack or board.peek() != movimento:
-                        board.push(movimento)
-                    resultados.append({"indice": indice + 1, "san": san, "brancas": lado == chess.WHITE,
-                                       "classificacao": "Sem avaliação", "perda": None})
-    except Exception as exc:
-        logging.exception("Erro na análise Stockfish.")
-        return None, f"Falha durante a análise: {exc}"
-    finally:
-        try:
-            engine.quit()
-        except Exception:
-            pass
-
-    for cor in (True, False):
-        lances = [x for x in resultados if x["brancas"] == cor and x["perda"] is not None]
-        precisao = None
-        if lances:
-            media = sum(min(x["perda"], 1000) for x in lances) / len(lances)
-            precisao = max(0.0, min(100.0, 100 * math.exp(-media / PRECISAO_GAMMA)))
-        for item in resultados:
-            if item["brancas"] == cor:
-                item["precisao"] = precisao
-    return {"game": jogo, "moves": resultados}, None
-
-
-def embed_lance_analise(dados, indice):
-    jogo, movimentos = dados["game"], dados["moves"]
-    board = jogo.board()
-    for move in list(jogo.mainline_moves())[:indice]:
-        board.push(move)
-    if indice == 0:
-        titulo, linhas = "Posição inicial", []
-    else:
-        item = movimentos[indice - 1]
-        perda = "—" if item["perda"] is None else f"{item['perda']} cp"
-        titulo = f"Lance {item['indice']}: {item['san']}"
-        linhas = [f"**Avaliação:** {item['classificacao']} • perda estimada: {perda}"]
-    branca = next((x["precisao"] for x in movimentos if x["brancas"] and x["precisao"] is not None), None)
-    preta = next((x["precisao"] for x in movimentos if not x["brancas"] and x["precisao"] is not None), None)
-    if branca is not None and preta is not None:
-        linhas.append(f"**Precisão estimada:** Brancas {branca:.1f}% • Pretas {preta:.1f}%")
-    embed = discord.Embed(title=f"♟️ Análise — {titulo}", description="\n".join(linhas) or "Use os botões para navegar pelos lances.",
-                          color=discord.Color.blurple())
-    embed.set_footer(text=f"Posição {indice}/{len(movimentos)} • Precisão aproximada, não oficial")
-    return embed, board
-
-
-class AnalisePGNView(discord.ui.View):
-    def __init__(self, owner_id, dados):
-        super().__init__(timeout=300)
-        self.owner_id, self.dados, self.indice = owner_id, dados, 0
-        self.total = len(dados["moves"])
-        self.atualizar_botoes()
-
-    def atualizar_botoes(self):
-        self.voltar.disabled = self.indice <= 0
-        self.avancar.disabled = self.indice >= self.total
-
-    async def interaction_check(self, interaction):
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Esta análise pertence a outro usuário.", ephemeral=True)
-            return False
-        return True
-
-    async def mudar(self, interaction, delta):
-        self.indice = max(0, min(self.total, self.indice + delta))
-        self.atualizar_botoes()
-        embed, board = embed_lance_analise(self.dados, self.indice)
-        buffer = io.BytesIO()
-        gerar_imagem_tabuleiro({"board": board, "moves": list(board.move_stack)}).save(buffer, format="PNG")
-        buffer.seek(0)
-        await interaction.response.edit_message(embed=embed,
-            attachments=[discord.File(buffer, filename="analise_tabuleiro.png")], view=self)
-
-    @discord.ui.button(label="Voltar", emoji="◀️", style=discord.ButtonStyle.secondary)
-    async def voltar(self, interaction, button):
-        await self.mudar(interaction, -1)
-
-    @discord.ui.button(label="Avançar", emoji="▶️", style=discord.ButtonStyle.primary)
-    async def avancar(self, interaction, button):
-        await self.mudar(interaction, 1)
-
-
-async def enviar_analise(interaction, pgn):
-    dados, erro = await asyncio.to_thread(analisar_pgn_stockfish, pgn)
-    if erro:
-        await interaction.followup.send(erro, ephemeral=True)
-        return
-    view = AnalisePGNView(interaction.user.id, dados)
-    embed, board = embed_lance_analise(dados, 0)
-    buffer = io.BytesIO()
-    gerar_imagem_tabuleiro({"board": board, "moves": []}).save(buffer, format="PNG")
-    buffer.seek(0)
-    await interaction.followup.send(embed=embed,
-        file=discord.File(buffer, filename="analise_tabuleiro.png"), view=view, ephemeral=True)
-
-
-class ColarPGNModal(discord.ui.Modal, title="Analisar partida"):
-    pgn = discord.ui.TextInput(label="Cole o PGN completo", style=discord.TextStyle.paragraph,
-                                placeholder='[Event "..."] ...', max_length=4000)
-
-    async def on_submit(self, interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        await enviar_analise(interaction, self.pgn.value)
-
-
-@bot.tree.command(name="analisar", description="Analise um PGN ou uma partida do seu histórico.")
-@app_commands.describe(numero_partida="Número da partida; deixe vazio para colar um PGN")
-async def analisar(interaction, numero_partida: app_commands.Range[int, 1, 1000000] = None):
-    if numero_partida is None:
-        await interaction.response.send_modal(ColarPGNModal())
-        return
-    partidas = obter_dados_usuario(interaction.user.id).get("history", [])
-    partida = next((x for x in partidas if numero_exibicao_partida(x.get("id")) == numero_partida), None)
-    pgn = str(partida.get("pgn") or "").strip() if partida else ""
-    if not pgn:
-        await interaction.response.send_message("Partida não encontrada ou sem PGN salvo.", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    await enviar_analise(interaction, pgn)
+@bot.tree.command(
+    name="analisar",
+    description="Comando temporariamente indisponível."
+)
+async def analisar(interaction):
+    await interaction.response.send_message(
+        "🔧 **O comando /analisar está temporariamente indisponível.**\n"
+        "Estamos trabalhando para disponibilizar a análise de partidas novamente.",
+        ephemeral=True
+    )
 
 
 # ============================================================
