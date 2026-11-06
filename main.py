@@ -410,6 +410,22 @@ def obter_dados_usuario(user_id):
     return user_data[user_id]
 
 
+def usuario_tem_nick(user_id):
+    dados = user_data.get(str(user_id))
+    return isinstance(dados, dict) and bool(str(dados.get("nickname") or "").strip())
+
+
+async def exigir_nick(interaction):
+    if usuario_tem_nick(interaction.user.id):
+        return True
+    mensagem = "você ainda não tem um nick, use /nick para escolher seu nome"
+    if interaction.response.is_done():
+        await interaction.followup.send(mensagem, ephemeral=True)
+    else:
+        await interaction.response.send_message(mensagem, ephemeral=True)
+    return False
+
+
 def obter_chesscoins(user_id: int) -> int:
     return max(0, int(obter_dados_usuario(user_id).get("chesscoins", 0)))
 
@@ -3179,12 +3195,17 @@ def embed_sala(sala):
 
 
 async def iniciar_sala(interaction, sala_id):
+    if not await exigir_nick(interaction):
+        return
     async with SALAS_LOCK:
         sala = SALAS_JOGO.get(sala_id)
         if sala is None or not sala_aberta(sala):
             await interaction.response.send_message("Essa mesa não está mais disponível.", ephemeral=True)
             return
         jogador = interaction.user.id
+        if not usuario_tem_nick(sala["owner"]):
+            await interaction.response.send_message("O criador desta mesa ainda não definiu um nick e não pode iniciar a partida.", ephemeral=True)
+            return
         if jogador == sala["owner"]:
             await interaction.response.send_message("Você não pode entrar na própria mesa.", ephemeral=True)
             return
@@ -3276,6 +3297,8 @@ class CriarSalaModal(discord.ui.Modal, title="Criar mesa de xadrez"):
     elo = discord.ui.TextInput(label="A partida vale ELO?", placeholder="Digite sim ou não", max_length=3)
 
     async def on_submit(self, interaction):
+        if not await exigir_nick(interaction):
+            return
         nome = str(self.nome.value).strip()
         vis = str(self.visibilidade.value).strip().lower()
         senha = str(self.senha.value).strip()
@@ -3328,7 +3351,13 @@ class RevancheView(discord.ui.View):
 
     @discord.ui.button(label="Revanche", emoji="🔁", style=discord.ButtonStyle.primary)
     async def revanche(self, interaction, button):
+        if not await exigir_nick(interaction):
+            return
         old = self.game
+        outro_id = old["black"] if interaction.user.id == old["white"] else old["white"]
+        if not usuario_tem_nick(outro_id):
+            await interaction.response.send_message("O outro jogador ainda não possui nick. A revanche não pode começar.", ephemeral=True)
+            return
         if interaction.user.id not in (old["white"], old["black"]):
             await interaction.response.send_message("Somente os jogadores desta partida podem pedir revanche.", ephemeral=True)
             return
@@ -3359,6 +3388,8 @@ class RevancheView(discord.ui.View):
 ])
 @app_commands.describe(acao="Deixe vazio para entrar em uma partida pública aleatória.", nome="Nome exato da mesa privada.", senha="Senha da mesa privada.")
 async def jogar(interaction, acao: str = None, nome: str = None, senha: str = None):
+    if not await exigir_nick(interaction):
+        return
     if jogador_ocupado(interaction.user.id):
         await interaction.response.send_message("Você já está em uma partida ou desafio.", ephemeral=True)
         return
