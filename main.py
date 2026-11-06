@@ -483,6 +483,58 @@ async def loja(interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+class ConquistasView(discord.ui.View):
+    def __init__(self, owner_id, unlocked, page=0):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.unlocked = set(unlocked)
+        self.page = page
+        self.per_page = 8
+        self.total_pages = max(1, (len(ACHIEVEMENTS) + self.per_page - 1) // self.per_page)
+        self.atualizar_botoes()
+
+    def atualizar_botoes(self):
+        self.voltar.disabled = self.page <= 0
+        self.avancar.disabled = self.page >= self.total_pages - 1
+
+    def criar_embed(self):
+        itens = list(ACHIEVEMENTS.items())
+        inicio = self.page * self.per_page
+        pagina = itens[inicio:inicio + self.per_page]
+        linhas = []
+        for chave, info in pagina:
+            estado = "✅" if chave in self.unlocked else "🔒"
+            linhas.append(
+                f"{estado} **{info['name']}**\n"
+                f"{info['description']} · 🪙 {info['reward']:,} ChessCoins"
+            )
+        embed = discord.Embed(
+            title="🏆 Conquistas — DisChessLord",
+            description="\n\n".join(linhas) or "Nenhuma conquista cadastrada.",
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text=f"Página {self.page + 1}/{self.total_pages} • {len(self.unlocked)} de {len(ACHIEVEMENTS)} desbloqueadas")
+        return embed
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Este painel pertence a outro jogador.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Anterior", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def voltar(self, interaction, button):
+        self.page -= 1
+        self.atualizar_botoes()
+        await interaction.response.edit_message(embed=self.criar_embed(), view=self)
+
+    @discord.ui.button(label="Próxima", emoji="▶️", style=discord.ButtonStyle.primary)
+    async def avancar(self, interaction, button):
+        self.page += 1
+        self.atualizar_botoes()
+        await interaction.response.edit_message(embed=self.criar_embed(), view=self)
+
+
 @bot.tree.command(name="conquistas", description="Veja suas conquistas e recompensas.")
 async def conquistas(interaction):
     dados = obter_dados_usuario(interaction.user.id)
@@ -490,22 +542,17 @@ async def conquistas(interaction):
     if novas and not salvar_dados():
         await interaction.response.send_message("Não consegui salvar suas conquistas. Tente novamente.", ephemeral=True)
         return
-    desbloqueadas = set(dados.get("achievements", []))
-    embeds = [
-        discord.Embed(title="🏅 Suas conquistas (1/2)", color=discord.Color.gold()),
-        discord.Embed(title="🏅 Suas conquistas (2/2)", color=discord.Color.gold())
-    ]
     if novas:
-        embeds[0].description = "Novas conquistas resgatadas: " + ", ".join(f"{nome} (+{valor})" for nome, valor in novas)
-    for indice, (chave, info) in enumerate(ACHIEVEMENTS.items()):
-        estado = "✅ Desbloqueada" if chave in desbloqueadas else "🔒 Bloqueada"
-        destino = embeds[indice // 25]
-        destino.add_field(
-            name=f"{info['name']} — {estado}",
-            value=f"{info['description']}\nRecompensa: **{info['reward']} ChessCoins**",
-            inline=False
-        )
-    await interaction.response.send_message(embeds=embeds, ephemeral=True)
+        resumo = ", ".join(f"{nome} (+{valor:,})" for nome, valor in novas)
+        dados_desbloqueadas = dados.get("achievements", [])
+    else:
+        resumo = None
+        dados_desbloqueadas = dados.get("achievements", [])
+    view = ConquistasView(interaction.user.id, dados_desbloqueadas)
+    embed = view.criar_embed()
+    if resumo:
+        embed.add_field(name="🎉 Novas conquistas", value=resumo[:1024], inline=False)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 @bot.tree.command(name="saldo", description="Veja seu saldo de ChessCoins.")
 async def cmd_saldo(interaction: discord.Interaction):
