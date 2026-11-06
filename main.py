@@ -3381,19 +3381,13 @@ def autorizado_adm(interaction):
     return p.administrator or p.manage_guild or p.moderate_members
 
 
-class TimeoutModal(discord.ui.Modal):
-    def __init__(self, owner_id, guild_id, remover=False):
-        super().__init__(title="Retirar timeout" if remover else "Aplicar timeout", timeout=180)
+class MuteModal(discord.ui.Modal):
+    def __init__(self, owner_id, mutar=True):
+        super().__init__(title="Mutar em chamada" if mutar else "Desmutar em chamada", timeout=180)
         self.owner_id = owner_id
-        self.guild_id = guild_id
-        self.remover = remover
+        self.mutar = mutar
         self.user_id_input = discord.ui.TextInput(label="ID do usuário", max_length=25)
         self.add_item(self.user_id_input)
-        if not remover:
-            self.minutes_input = discord.ui.TextInput(label="Duração em minutos (1 a 40320)", max_length=5)
-            self.reason_input = discord.ui.TextInput(label="Motivo", required=False, max_length=300)
-            self.add_item(self.minutes_input)
-            self.add_item(self.reason_input)
 
     async def on_submit(self, interaction):
         if interaction.user.id != self.owner_id or not autorizado_adm(interaction):
@@ -3403,23 +3397,18 @@ class TimeoutModal(discord.ui.Modal):
             member = interaction.guild.get_member(int(str(self.user_id_input.value)))
             if member is None or member.id == interaction.user.id or member.top_role >= interaction.user.top_role:
                 raise ValueError
-            if self.remover:
-                await member.timeout(None, reason=f"Timeout removido por {interaction.user}")
-                msg = f"Timeout removido de {member.mention}."
-            else:
-                minutes = int(str(self.minutes_input.value))
-                if not 1 <= minutes <= 40320:
-                    raise ValueError
-                reason = str(self.reason_input.value).strip() or "Sem motivo informado"
-                await member.timeout(datetime.now(timezone.utc) + timedelta(minutes=minutes), reason=reason)
-                msg = f"Timeout aplicado em {member.mention} por {minutes} minuto(s)."
+            if member.voice is None or member.voice.channel is None:
+                await interaction.response.send_message("Esse membro não está conectado a um canal de voz.", ephemeral=True)
+                return
+            await member.edit(mute=self.mutar, reason=f"Voice mute por {interaction.user}")
+            acao = "mutado" if self.mutar else "desmutado"
         except ValueError:
-            await interaction.response.send_message("ID, hierarquia ou duração inválida. O alvo precisa estar abaixo de você.", ephemeral=True)
+            await interaction.response.send_message("ID inválido ou o alvo está em cargo igual/superior ao seu.", ephemeral=True)
             return
         except discord.Forbidden:
-            await interaction.response.send_message("Não tenho permissão ou o cargo do alvo é superior ao meu.", ephemeral=True)
+            await interaction.response.send_message("Não tenho permissão para mutar esse membro.", ephemeral=True)
             return
-        await interaction.response.send_message("✅ " + msg, ephemeral=True)
+        await interaction.response.send_message(f"✅ {member.mention} foi {acao} na chamada de voz.", ephemeral=True)
 
 
 class SorteioCriarModal(discord.ui.Modal):
@@ -3428,34 +3417,27 @@ class SorteioCriarModal(discord.ui.Modal):
         self.owner_id = owner_id
         self.nome = discord.ui.TextInput(label="Nome do sorteio", max_length=80)
         self.premio = discord.ui.TextInput(label="Prêmio", max_length=150)
-        self.custo = discord.ui.TextInput(label="Tickets por participação", default="1", max_length=3)
         self.add_item(self.nome)
         self.add_item(self.premio)
-        self.add_item(self.custo)
 
     async def on_submit(self, interaction):
-        if interaction.user.id != self.owner_id or not autorizado_dev(interaction.user.id):
-            await interaction.response.send_message("Sem autorização.", ephemeral=True)
-            return
-        try:
-            custo = int(str(self.custo.value))
-            if custo < 1 or custo > 100:
-                raise ValueError
-        except ValueError:
-            await interaction.response.send_message("O custo deve ser de 1 a 100 tickets.", ephemeral=True)
-            return
-        if interaction.guild is None or not autorizado_adm(interaction):
-            await interaction.response.send_message("Somente a equipe de administração pode criar sorteios.", ephemeral=True)
+        if interaction.user.id != self.owner_id or not autorizado_adm(interaction):
+            await interaction.response.send_message("Somente a equipe administrativa pode criar sorteios por este painel.", ephemeral=True)
             return
         dados_admin = obter_dados_usuario(interaction.user.id)
         saldo_tickets = int(dados_admin.get("command_tickets", 0))
         if saldo_tickets < 1:
             await interaction.response.send_message("Você precisa de 1 ticket administrativo para criar um sorteio. Peça ao desenvolvedor para distribuir tickets.", ephemeral=True)
             return
+        nome = " ".join(str(self.nome.value).split())
+        premio = str(self.premio.value).strip()
+        if not nome or not premio:
+            await interaction.response.send_message("Informe o nome e o prêmio.", ephemeral=True)
+            return
         rid = gerar_id()
         admin_data.setdefault("raffles", {})[rid] = {
-            "id": rid, "name": str(self.nome.value).strip(),
-            "prize": str(self.premio.value).strip(), "ticket_cost": 0,
+            "id": rid, "name": nome,
+            "prize": premio, "ticket_cost": 0,
             "status": "aberto", "entries": {}, "created_at": data_iso(),
             "guild_id": interaction.guild_id, "channel_id": interaction.channel_id,
             "created_by": interaction.user.id
@@ -3467,7 +3449,7 @@ class SorteioCriarModal(discord.ui.Modal):
             salvar_dados()
             await interaction.response.send_message("Falha ao salvar o sorteio; ticket devolvido.", ephemeral=True)
             return
-        await interaction.response.send_message(f"🎟️ Sorteio **{self.nome.value}** criado! Foi usado 1 ticket administrativo. Restam **{saldo_tickets - 1}**.", ephemeral=True)
+        await interaction.response.send_message(f"🎟️ Sorteio **{nome}** criado! Foi usado 1 ticket administrativo. Restam **{saldo_tickets - 1}**.", ephemeral=True)
 
 
 class TicketsModal(discord.ui.Modal):
@@ -3578,19 +3560,24 @@ class AdmDashboardView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Aplicar timeout", emoji="🔇", style=discord.ButtonStyle.danger)
-    async def aplicar_timeout(self, interaction, button):
-        await interaction.response.send_modal(TimeoutModal(self.owner_id, self.guild_id))
+    @discord.ui.button(label="Mutar em chamada", emoji="🔇", style=discord.ButtonStyle.danger, row=0)
+    async def mutar_membro(self, interaction, button):
+        await interaction.response.send_modal(MuteModal(self.owner_id, True))
 
-    @discord.ui.button(label="Retirar timeout", emoji="🔊", style=discord.ButtonStyle.success)
-    async def untimeout(self, interaction, button):
-        await interaction.response.send_modal(TimeoutModal(self.owner_id, self.guild_id, True))
+    @discord.ui.button(label="Desmutar em chamada", emoji="🔊", style=discord.ButtonStyle.success, row=0)
+    async def desmutar_membro(self, interaction, button):
+        await interaction.response.send_modal(MuteModal(self.owner_id, False))
 
-    @discord.ui.button(label="Atividade", emoji="📋", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Criar sorteio", emoji="🎟️", style=discord.ButtonStyle.success, row=1)
+    async def criar_sorteio(self, interaction, button):
+        await interaction.response.send_modal(SorteioCriarModal(self.owner_id))
+
+    @discord.ui.button(label="Atividade", emoji="📋", style=discord.ButtonStyle.primary, row=1)
     async def atividade(self, interaction, button):
-        eventos = [x for x in admin_data.get("events", {}).values() if x.get("status") in ("ativo", "aberto")]
-        torneios = [x for x in admin_data.get("tournaments", {}).values() if x.get("status") in ("inscricoes", "inscrições", "ativo")]
-        sorteios = [x for x in admin_data.get("raffles", {}).values() if x.get("status") == "aberto"]
+        guild_id = interaction.guild_id
+        eventos = [x for x in admin_data.get("events", {}).values() if x.get("status") in ("ativo", "aberto") and x.get("guild_id") == guild_id]
+        torneios = [x for x in admin_data.get("tournaments", {}).values() if x.get("status") in ("inscricoes", "inscrições", "ativo") and x.get("guild_id") == guild_id]
+        sorteios = [x for x in admin_data.get("raffles", {}).values() if x.get("status") == "aberto" and x.get("guild_id") == guild_id]
         def linhas(items):
             return "\n".join("• " + str(x.get("name", "Sem nome")) for x in items[:8]) or "Nenhum"
         embed = discord.Embed(title="📋 Atividade do servidor", color=discord.Color.blurple())
