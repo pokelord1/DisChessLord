@@ -3205,6 +3205,9 @@ async def resetar(
         for jogador in marcados
     ]
 
+    reset_titulo = bool(titulo and titulo.value == "sim")
+    reset_nick = bool(nick and nick.value == "sim")
+
     descricao = (
         f"Você está prestes a resetar **{len(ids_reset)} perfil(s)**.\n"
         "ELO, Peak, estatísticas e histórico serão apagados.\n"
@@ -3215,9 +3218,6 @@ async def resetar(
 
     if nomes:
         descricao += "\n\n" + "\n".join(nomes)
-
-    reset_titulo = bool(titulo and titulo.value == "sim")
-    reset_nick = bool(nick and nick.value == "sim")
 
     view = ConfirmResetView(
         ids_reset,
