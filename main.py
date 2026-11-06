@@ -1901,14 +1901,17 @@ def finalizar_partida(game, resultado, motivo):
         dados_brancas["ranking_ativo"] = True
         dados_pretas["ranking_ativo"] = True
 
-    delta_brancas, delta_pretas = calcular_delta_elo(
-        elo_brancas_antes,
-        elo_pretas_antes,
-        score
-    )
-
-    atualizar_elo(white, delta_brancas)
-    atualizar_elo(black, delta_pretas)
+    if game.get("elo_enabled", True):
+        delta_brancas, delta_pretas = calcular_delta_elo(
+            elo_brancas_antes,
+            elo_pretas_antes,
+            score
+        )
+        atualizar_elo(white, delta_brancas)
+        atualizar_elo(black, delta_pretas)
+    else:
+        delta_brancas = 0
+        delta_pretas = 0
 
     registrar_historico(
         game,
@@ -1969,7 +1972,7 @@ def criar_embed_final(
         color=discord.Color.gold()
     )
 
-    if resultado_elo:
+    if resultado_elo and game.get("elo_enabled", True):
         embed.add_field(
             name="ELO das Brancas",
             value=(
@@ -2809,7 +2812,7 @@ class ConfirmDesistenciaView(discord.ui.View):
                     await self.game["message"].edit(
                         content=None,
                         embed=embed,
-                        view=None
+                        view=RevancheView(self.game)
                     )
                 except discord.HTTPException:
                     logging.exception(
@@ -2879,7 +2882,7 @@ async def atualizar_tabuleiro(
         await interaction.response.edit_message(
             content=None,
             embed=embed,
-            view=None
+            view=RevancheView(game)
         )
 
         return
@@ -3099,94 +3102,291 @@ class ChallengeView(discord.ui.View):
 
 
 # ============================================================
-# 17. COMANDO DESAFIAR
+# 17. SISTEMA /JOGAR
 # ============================================================
 
-@bot.tree.command(
-    name="desafiar",
-    description="Desafie outro jogador para uma partida."
-)
-@app_commands.describe(
-    jogador="Jogador que você deseja desafiar"
-)
-async def desafiar(
-    interaction,
-    jogador: discord.Member
-):
-    if jogador.bot:
-        await interaction.response.send_message(
-            "Você não pode desafiar bots.",
-            ephemeral=True
-        )
-        return
 
-    if jogador.id == interaction.user.id:
-        await interaction.response.send_message(
-            "Você não pode desafiar a si mesmo.",
-            ephemeral=True
-        )
-        return
+SALAS_JOGO = {}
+SALAS_LOCK = asyncio.Lock()
+NOME_FORUM_JOGOS = "♟️-mesas-de-jogo"
 
-    async with challenge_lock:
 
-        if jogador_ocupado(interaction.user.id):
-            await interaction.response.send_message(
-                "Você já está em uma partida ou desafio.",
-                ephemeral=True
-            )
-            return
-
-        if jogador_ocupado(jogador.id):
-            await interaction.response.send_message(
-                "Esse jogador já está em uma partida ou desafio.",
-                ephemeral=True
-            )
-            return
-
-        if interaction.channel_id in active_games:
-            await interaction.response.send_message(
-                "Já existe uma partida neste canal.",
-                ephemeral=True
-            )
-            return
-
-        challenge_id = gerar_id()
-
-        view = ChallengeView(
-            challenge_id,
-            interaction.user.id,
-            jogador.id,
-            interaction.channel_id,
-            interaction.guild_id
-        )
-
-        pending_challenges[challenge_id] = {
-            "challenger": interaction.user.id,
-            "opponent": jogador.id,
-            "channel_id": interaction.channel_id,
-            "guild_id": interaction.guild_id
-        }
-
+async def obter_forum_jogos(interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("Use este comando em um servidor.", ephemeral=True)
+        return None
+    canal = interaction.channel
+    if isinstance(canal, discord.ForumChannel):
+        admin_data.setdefault("settings", {})["game_forum_id"] = canal.id
+        salvar_admin()
+        return canal
+    forum_id = admin_data.setdefault("settings", {}).get("game_forum_id")
+    forum = interaction.guild.get_channel(int(forum_id)) if forum_id else None
+    if isinstance(forum, discord.ForumChannel):
+        return forum
+    dono = interaction.guild.owner
     try:
+        await interaction.channel.send(
+            f"{dono.mention if dono else 'Dono do servidor'}, o DisChessLord precisa de um canal Fórum. Vou tentar criar **{NOME_FORUM_JOGOS}**."
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+    me = interaction.guild.me
+    if me is None or not me.guild_permissions.manage_channels:
         await interaction.response.send_message(
-            f"♟️ {jogador.mention}, você foi desafiado por "
-            f"{interaction.user.mention}!\n"
-            f"Você tem {TEMPO_DESAFIO} segundos.",
-            view=view
+            f"Não encontrei um Fórum e não posso criar canais. Peça ao dono para criar **{NOME_FORUM_JOGOS}** e dar ao bot a permissão Gerenciar canais.",
+            ephemeral=True
         )
-
-        view.message = (
-            await interaction.original_response()
+        return None
+    try:
+        forum = await interaction.guild.create_forum(
+            name=NOME_FORUM_JOGOS,
+            topic="Partidas públicas e privadas de xadrez do DisChessLord.",
+            reason="Canal de mesas do DisChessLord"
         )
+        admin_data.setdefault("settings", {})["game_forum_id"] = forum.id
+        salvar_admin()
+        await forum.send("♟️ Canal de mesas criado! Use /jogar para encontrar ou criar uma partida.")
+        return forum
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            f"Não consegui criar **{NOME_FORUM_JOGOS}**. O dono do servidor precisa criar esse canal Fórum e conceder Gerenciar canais ao bot.",
+            ephemeral=True
+        )
+        return None
+    except discord.HTTPException:
+        logging.exception("Falha ao criar o fórum de mesas.")
+        await interaction.response.send_message("O Discord não permitiu criar o Fórum. Avise o dono do servidor.", ephemeral=True)
+        return None
 
-    except Exception:
-        async with challenge_lock:
-            pending_challenges.pop(
-                challenge_id,
-                None
+
+def sala_aberta(sala):
+    return sala.get("status") == "aguardando"
+
+
+def embed_sala(sala):
+    embed = discord.Embed(title=f"♟️ {sala['name']}", description="Mesa aguardando um segundo jogador.", color=discord.Color.blurple())
+    embed.add_field(name="Criador", value=f"<@{sala['owner']}>", inline=True)
+    embed.add_field(name="Visibilidade", value="🔒 Privada" if sala["private"] else "🌐 Pública", inline=True)
+    embed.add_field(name="ELO", value="Ativado" if sala["elo"] else "Desativado", inline=True)
+    embed.add_field(name="Vagas", value="1/2", inline=True)
+    return embed
+
+
+async def iniciar_sala(interaction, sala_id):
+    async with SALAS_LOCK:
+        sala = SALAS_JOGO.get(sala_id)
+        if sala is None or not sala_aberta(sala):
+            await interaction.response.send_message("Essa mesa não está mais disponível.", ephemeral=True)
+            return
+        jogador = interaction.user.id
+        if jogador == sala["owner"]:
+            await interaction.response.send_message("Você não pode entrar na própria mesa.", ephemeral=True)
+            return
+        if jogador_ocupado(jogador) or jogador_ocupado(sala["owner"]):
+            await interaction.response.send_message("Um dos jogadores já está em uma partida ou desafio.", ephemeral=True)
+            return
+        thread = sala["thread"]
+        game = criar_partida(sala["owner"], jogador, thread.id, interaction.guild_id)
+        game["elo_enabled"] = bool(sala["elo"])
+        game["room_name"] = sala["name"]
+        active_games[thread.id] = game
+        SALAS_JOGO.pop(sala_id, None)
+        view = ChessBoardView(game)
+        message = sala.get("message")
+        if message is None:
+            message = await thread.send(embed=criar_embed_partida(game), view=view)
+        else:
+            await message.edit(content=f"♟️ **{sala['name']}** — partida iniciada!", embed=criar_embed_partida(game), view=view)
+        game["message"] = message
+        await interaction.response.send_message(f"Você entrou em **{sala['name']}**! A partida começou em {thread.mention}.", ephemeral=True)
+
+
+class EntrarSalaView(discord.ui.View):
+    def __init__(self, sala_id):
+        super().__init__(timeout=None)
+        self.sala_id = sala_id
+
+    @discord.ui.button(label="Entrar na partida", emoji="♟️", style=discord.ButtonStyle.success)
+    async def entrar(self, interaction, button):
+        sala = SALAS_JOGO.get(self.sala_id)
+        if sala is None or sala.get("private"):
+            await interaction.response.send_message("Essa mesa não está mais disponível.", ephemeral=True)
+            return
+        await iniciar_sala(interaction, self.sala_id)
+
+
+class ListaSalasView(discord.ui.View):
+    def __init__(self, salas, page=0):
+        super().__init__(timeout=180)
+        self.salas = salas
+        self.page = page
+        self.por_pagina = 5
+        self.atualizar()
+
+    def atualizar(self):
+        self.clear_items()
+        lote = self.salas[self.page * self.por_pagina:(self.page + 1) * self.por_pagina]
+        if lote:
+            select = discord.ui.Select(
+                placeholder="Selecione uma partida para entrar",
+                options=[discord.SelectOption(label=x["name"][:100], description=f"Criador: {x['owner_name']} • ELO {'sim' if x['elo'] else 'não'}", value=x["id"]) for x in lote],
+                row=0
             )
+            select.callback = self.selecionar
+            self.add_item(select)
+        prev = discord.ui.Button(label="Anterior", emoji="⬅️", style=discord.ButtonStyle.secondary, disabled=self.page == 0, row=1)
+        nxt = discord.ui.Button(label="Próxima", emoji="➡️", style=discord.ButtonStyle.secondary, disabled=(self.page + 1) * self.por_pagina >= len(self.salas), row=1)
+        prev.callback = self.anterior
+        nxt.callback = self.proxima
+        self.add_item(prev)
+        self.add_item(nxt)
 
-        raise
+    def embed(self):
+        total = max(1, (len(self.salas) + self.por_pagina - 1) // self.por_pagina)
+        embed = discord.Embed(title="♟️ Partidas públicas disponíveis", description="Selecione uma mesa abaixo." if self.salas else "Nenhuma mesa aguardando jogador.", color=discord.Color.blurple())
+        for x in self.salas[self.page * self.por_pagina:(self.page + 1) * self.por_pagina]:
+            embed.add_field(name=x["name"], value=f"Criador: <@{x['owner']}> • Vagas: 1/2\nELO: {'Sim' if x['elo'] else 'Não'} • [Abrir mesa]({x['thread'].jump_url})", inline=False)
+        embed.set_footer(text=f"Página {self.page + 1}/{total} • {len(self.salas)} mesa(s)")
+        return embed
+
+    async def selecionar(self, interaction):
+        await iniciar_sala(interaction, interaction.data["values"][0])
+
+    async def anterior(self, interaction):
+        self.page = max(0, self.page - 1)
+        self.atualizar()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    async def proxima(self, interaction):
+        self.page = min((len(self.salas) - 1) // self.por_pagina, self.page + 1)
+        self.atualizar()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+
+class CriarSalaModal(discord.ui.Modal, title="Criar mesa de xadrez"):
+    nome = discord.ui.TextInput(label="Nome da partida", placeholder="Ex.: Xadrez casual", max_length=80)
+    visibilidade = discord.ui.TextInput(label="Pública ou privada?", placeholder="Digite pública ou privada", max_length=10)
+    senha = discord.ui.TextInput(label="Senha (somente mesa privada)", placeholder="Deixe vazio se pública", required=False, max_length=50)
+    elo = discord.ui.TextInput(label="A partida vale ELO?", placeholder="Digite sim ou não", max_length=3)
+
+    async def on_submit(self, interaction):
+        nome = str(self.nome.value).strip()
+        vis = str(self.visibilidade.value).strip().lower()
+        senha = str(self.senha.value).strip()
+        elo_txt = str(self.elo.value).strip().lower()
+        if not nome or vis not in ("publica", "pública", "privada") or elo_txt not in ("sim", "não", "nao"):
+            await interaction.response.send_message("Confira os campos: nome, visibilidade pública/privada e ELO sim/não.", ephemeral=True)
+            return
+        privada = vis == "privada"
+        if (privada and not senha) or (not privada and senha):
+            await interaction.response.send_message("Mesa privada exige senha; mesa pública deve ficar sem senha.", ephemeral=True)
+            return
+        forum = await obter_forum_jogos(interaction)
+        if forum is None:
+            return
+        sid = gerar_id()
+        sala = {
+            "id": sid, "name": nome, "owner": interaction.user.id,
+            "owner_name": interaction.user.display_name, "private": privada,
+            "password": senha if privada else None, "elo": elo_txt == "sim",
+            "status": "aguardando", "thread": None, "message": None
+        }
+        try:
+            created = await forum.create_thread(
+                name=nome[:100],
+                content=f"♟️ **{nome}**\nCriada por {interaction.user.mention}.\n{'🔒 Mesa privada — entrada com senha.' if privada else '🌐 Mesa pública — qualquer jogador disponível pode entrar.'}\nELO: **{'Ativado' if sala['elo'] else 'Desativado'}**",
+                embed=embed_sala(sala),
+                view=None if privada else EntrarSalaView(sid)
+            )
+            thread = getattr(created, "thread", None)
+            message = getattr(created, "message", None)
+            if thread is None:
+                thread = created[0]
+            if message is None:
+                message = created[1]
+            sala["thread"], sala["message"] = thread, message
+            SALAS_JOGO[sid] = sala
+            await interaction.response.send_message(f"Mesa **{nome}** criada em {thread.mention}!", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("Não tenho permissão para criar publicações neste Fórum.", ephemeral=True)
+        except discord.HTTPException:
+            logging.exception("Falha ao criar mesa.")
+            await interaction.response.send_message("Não consegui criar a mesa. Tente novamente.", ephemeral=True)
+
+
+class RevancheView(discord.ui.View):
+    def __init__(self, game):
+        super().__init__(timeout=86400)
+        self.game = game
+        self.requester = None
+
+    @discord.ui.button(label="Revanche", emoji="🔁", style=discord.ButtonStyle.primary)
+    async def revanche(self, interaction, button):
+        old = self.game
+        if interaction.user.id not in (old["white"], old["black"]):
+            await interaction.response.send_message("Somente os jogadores desta partida podem pedir revanche.", ephemeral=True)
+            return
+        if self.requester is None:
+            self.requester = interaction.user.id
+            await interaction.response.edit_message(content=f"🔁 {interaction.user.mention} pediu revanche! O outro jogador deve clicar para aceitar.", view=self)
+            return
+        if self.requester == interaction.user.id:
+            await interaction.response.send_message("Aguardando o outro jogador aceitar.", ephemeral=True)
+            return
+        tid = old["channel_id"]
+        if tid in active_games:
+            await interaction.response.send_message("Já existe uma partida ativa nesta mesa.", ephemeral=True)
+            return
+        game = criar_partida(old["white"], old["black"], tid, old.get("guild_id"))
+        game["elo_enabled"] = old.get("elo_enabled", True)
+        game["room_name"] = old.get("room_name")
+        active_games[tid] = game
+        game["message"] = interaction.message
+        await interaction.response.edit_message(content="🔁 Revanche aceita! Nova partida iniciada.", embed=criar_embed_partida(game), view=ChessBoardView(game))
+
+
+@bot.tree.command(name="jogar", description="Entre, crie ou encontre uma mesa de xadrez.")
+@app_commands.choices(acao=[
+    app_commands.Choice(name="Partidas disponíveis", value="partidas"),
+    app_commands.Choice(name="Criar uma partida", value="criar"),
+    app_commands.Choice(name="Entrar em partida privada", value="entrar")
+])
+@app_commands.describe(acao="Deixe vazio para entrar em uma partida pública aleatória.", nome="Nome exato da mesa privada.", senha="Senha da mesa privada.")
+async def jogar(interaction, acao: str = None, nome: str = None, senha: str = None):
+    if jogador_ocupado(interaction.user.id):
+        await interaction.response.send_message("Você já está em uma partida ou desafio.", ephemeral=True)
+        return
+    if acao == "criar":
+        await interaction.response.send_modal(CriarSalaModal())
+        return
+    forum = await obter_forum_jogos(interaction)
+    if forum is None:
+        return
+    if acao == "partidas":
+        salas = sorted([x for x in SALAS_JOGO.values() if sala_aberta(x) and not x["private"]], key=lambda x: x["name"].casefold())
+        if not salas:
+            await interaction.response.send_message("Não há partidas públicas disponíveis no momento.", ephemeral=True)
+            return
+        view = ListaSalasView(salas)
+        await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
+        return
+    if acao == "entrar":
+        if not nome or not senha:
+            await interaction.response.send_message("Informe o nome e a senha da mesa privada.", ephemeral=True)
+            return
+        sala = next((x for x in SALAS_JOGO.values() if sala_aberta(x) and x["private"] and x["name"].casefold() == nome.strip().casefold()), None)
+        if sala is None or not secrets.compare_digest(str(sala["password"]), str(senha)):
+            await interaction.response.send_message("Mesa privada não encontrada ou senha incorreta.", ephemeral=True)
+            return
+        await iniciar_sala(interaction, sala["id"])
+        return
+    salas = [x for x in SALAS_JOGO.values() if sala_aberta(x) and not x["private"] and x["owner"] != interaction.user.id]
+    if not salas:
+        await interaction.response.send_message("Não há partidas públicas aguardando jogador. Escolha Criar para abrir uma mesa.", ephemeral=True)
+        return
+    await iniciar_sala(interaction, secrets.choice(salas)["id"])
+
 
 
 # ============================================================
@@ -6743,7 +6943,7 @@ async def help_command(interaction):
                           description="Comandos disponíveis organizados por categoria.",
                           color=discord.Color.blurple())
     embed.add_field(name="♟️ Comandos normais",
-        value="\`/desafiar\` — desafiar jogador\n\`/nick\` — definir nick\n\`/perfil\` — consultar perfil\n\`/ranking\` — ranking de ELO\n\`/historico\` — histórico de partidas\n\`/analisar\` — ver PGN\n\`/saldo\` — saldo de ChessCoins\n\`/daily\` — resgatar 50 ChessCoins por dia\n\`/loja\` — loja de itens\n\`/conquistas\` — conquistas e recompensas\n\`/eventos\` — eventos ativos\n\`/torneios\` — torneios ativos\n\`/inscrever_torneio\` — inscrever-se\n\`/sorteios\` — sorteios abertos\n\`/participar_sorteio\` — entrar em sorteio", inline=False)
+        value="\`/jogar\` — entrar em partida, listar mesas, criar ou entrar em mesa privada\n\`/nick\` — definir nick\n\`/perfil\` — consultar perfil\n\`/ranking\` — ranking de ELO\n\`/historico\` — histórico de partidas\n\`/analisar\` — ver PGN\n\`/saldo\` — saldo de ChessCoins\n\`/daily\` — resgatar 50 ChessCoins por dia\n\`/loja\` — loja de itens\n\`/conquistas\` — conquistas e recompensas\n\`/eventos\` — eventos ativos\n\`/torneios\` — torneios ativos\n\`/inscrever_torneio\` — inscrever-se\n\`/sorteios\` — sorteios abertos\n\`/participar_sorteio\` — entrar em sorteio", inline=False)
     embed.add_field(name="🛡️ Comandos administrativos",
         value="\`/adm_dashboard\` — painel de moderação\n\`/configurar_denuncias\` — definir canal de denúncias\n\`/limparchat\` — limpar mensagens (dono do servidor)", inline=False)
     embed.add_field(name="⚙️ Comandos de desenvolvedor",
