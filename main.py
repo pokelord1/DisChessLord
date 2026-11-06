@@ -16,57 +16,6 @@ from discord.ext import commands
 
 import chess
 import chess.pgn
-from supabase import create_client, Client
-
-# Configuração de Intents e Inicialização do Bot
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-# Conexão com o Supabase (lê as variáveis configuradas na FadeHost)
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# --- FUNÇÕES DO BANCO DE DADOS (CHESSCOINS) ---
-
-def obter_chesscoins(user_id: int) -> int:
-    try:
-        res = supabase.table("chesscoins").select("saldo").eq("user_id", str(user_id)).execute()
-        if res.data:
-            return res.data[0]["saldo"]
-        return 0
-    except Exception as e:
-        print(f"Erro ao ler saldo: {e}")
-        return 0
-
-def alterar_chesscoins(user_id: int, quantia: int):
-    """
-    Adiciona ou remove moedas. 
-    Use valores positivos para somar (ex: 100) e negativos para descontar (ex: -50).
-    """
-    saldo_atual = obter_chesscoins(user_id)
-    novo_saldo = max(0, saldo_atual + quantia)
-    try:
-        supabase.table("chesscoins").upsert(
-            {"user_id": str(user_id), "saldo": novo_saldo}
-        ).execute()
-    except Exception as e:
-        print(f"Erro ao salvar saldo no Supabase: {e}")
-
-# --- COMANDO SLASH PARA CONSULTAR SALDO ---
-
-@bot.tree.command(name="saldo", description="Veja seu saldo de Chesscoins!")
-async def cmd_saldo(interaction: discord.Interaction):
-    saldo = obter_chesscoins(interaction.user.id)
-    embed = discord.Embed(
-        title="🪙 Sua Carteira de Chesscoins",
-        description=f"Você possui **{saldo} 🪙 Chesscoins**!",
-        color=discord.Color.blue()
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
 # ============================================================
 # 1. CONFIGURAÇÃO
 # ============================================================
@@ -289,6 +238,9 @@ def embed_sucesso(texto):
 
 def dados_padrao():
     return {
+        "chesscoins": 0,
+        "command_tickets": 0,
+        "ranking_ativo": False,
         "elo": 100,
         "peak_elo": 100,
         "wins": 0,
@@ -400,6 +352,34 @@ def obter_dados_usuario(user_id):
             if chave not in user_data[user_id]:
                 user_data[user_id][chave] = valor
     return user_data[user_id]
+
+
+def obter_chesscoins(user_id: int) -> int:
+    return max(0, int(obter_dados_usuario(user_id).get("chesscoins", 0)))
+
+
+def alterar_chesscoins(user_id: int, quantia: int) -> bool:
+    dados = obter_dados_usuario(user_id)
+    saldo_anterior = obter_chesscoins(user_id)
+    novo_saldo = saldo_anterior + int(quantia)
+    if novo_saldo < 0:
+        return False
+    dados["chesscoins"] = novo_saldo
+    if not salvar_dados():
+        dados["chesscoins"] = saldo_anterior
+        return False
+    return True
+
+
+@bot.tree.command(name="saldo", description="Veja seu saldo de ChessCoins.")
+async def cmd_saldo(interaction: discord.Interaction):
+    saldo = obter_chesscoins(interaction.user.id)
+    embed = discord.Embed(
+        title="🪙 Sua carteira de ChessCoins",
+        description=f"Você possui **{saldo} ChessCoins**.",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 def nome_jogador(user_id, guild=None):
@@ -977,7 +957,12 @@ def criar_partida(
     channel_id,
     guild_id=None
 ):
-    game_id = gerar_id()
+    proximo = int(admin_data.setdefault("settings", {}).get("next_match_number", 1))
+    game_id = str(proximo)
+    admin_data["settings"]["next_match_number"] = proximo + 1
+    if not salvar_admin():
+        admin_data["settings"]["next_match_number"] = proximo
+        raise RuntimeError("Não foi possível reservar o número da partida.")
 
     evento = (
         evento_ativo(guild_id)
@@ -1147,16 +1132,24 @@ def finalizar_partida(game, resultado, motivo):
         score = 1.0
         dados_brancas["wins"] += 1
         dados_pretas["losses"] += 1
+        dados_brancas["ranking_ativo"] = True
+        dados_pretas["ranking_ativo"] = True
+        dados_brancas["chesscoins"] = obter_chesscoins(white) + 10
 
     elif resultado == "0-1":
         score = 0.0
         dados_brancas["losses"] += 1
         dados_pretas["wins"] += 1
+        dados_brancas["ranking_ativo"] = True
+        dados_pretas["ranking_ativo"] = True
+        dados_pretas["chesscoins"] = obter_chesscoins(black) + 10
 
     else:
         score = 0.5
         dados_brancas["draws"] += 1
         dados_pretas["draws"] += 1
+        dados_brancas["ranking_ativo"] = True
+        dados_pretas["ranking_ativo"] = True
 
     delta_brancas, delta_pretas = calcular_delta_elo(
         elo_brancas_antes,
@@ -2665,15 +2658,10 @@ async def ranking(interaction):
     jogadores = []
 
     for user_id, dados in user_data.items():
-        elo = (
-            dados
-            if isinstance(dados, int)
-            else dados.get("elo", 100)
-        )
-
-        jogadores.append(
-            (int(user_id), elo)
-        )
+        if not isinstance(dados, dict) or not dados.get("ranking_ativo", False):
+            continue
+        elo = dados.get("elo", 100)
+        jogadores.append((int(user_id), elo))
 
     jogadores.sort(
         key=lambda item: item[1],
@@ -2778,7 +2766,7 @@ async def historico(
         linhas.append(
             f"**{situacao}** contra {nome} "
             f"— {delta:+} ELO\n"
-            f"Partida `{partida['id'][:8]}`"
+            f"Partida **#{partida['id']}**"
         )
 
     embed = discord.Embed(
@@ -2850,7 +2838,7 @@ async def analisar(
         pgn = pgn[:1800] + "\n... (reduzido)"
 
     embed = discord.Embed(
-        title=f"♟️ PGN da partida {partida['id'][:8]}",
+        title=f"♟️ PGN da partida #{partida['id']}",
         description=(
             f"Resultado: **{partida['result']}**\n"
             f"Motivo: **{partida['reason']}**\n\n"
@@ -2988,7 +2976,13 @@ class ConfirmResetView(discord.ui.View):
                     return
 
                 for user_id in self.ids_reset:
-                    user_data[user_id] = dados_padrao()
+                    anterior = user_data.get(user_id, {})
+                    novo = dados_padrao()
+                    if isinstance(anterior, dict):
+                        novo["chesscoins"] = int(anterior.get("chesscoins", 0))
+                        novo["command_tickets"] = int(anterior.get("command_tickets", 0))
+                    novo["ranking_ativo"] = False
+                    user_data[user_id] = novo
 
                 if not salvar_dados():
                     user_data.clear()
@@ -5237,7 +5231,6 @@ async def eventos(interaction):
     for evento in lista[:10]:
         linhas.append(
             f"🎉 **{evento['name']}**\n"
-            f"ID: `{evento['id']}`\n"
             f"Término: `{evento['ends_at']}`"
         )
 
@@ -5264,9 +5257,10 @@ async def torneios(interaction):
         )
         return
 
-    lista = torneios_do_servidor(
-        interaction.guild_id
-    )
+    lista = [
+        t for t in torneios_do_servidor(interaction.guild_id)
+        if t.get("status") in ("inscricoes", "em_andamento", "ativo")
+    ]
 
     if not lista:
         await interaction.response.send_message(
@@ -5280,8 +5274,8 @@ async def torneios(interaction):
     for torneio in lista[:10]:
         linhas.append(
             f"🏆 **{torneio['name']}**\n"
-            f"ID: `{torneio['id']}`\n"
             f"Status: **{torneio['status']}**\n"
+            f"Prêmio: **{torneio.get('prize') or 'Não definido'}**\n"
             f"Participantes: **{len(torneio['participants'])}**"
         )
 
