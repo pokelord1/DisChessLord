@@ -3631,7 +3631,7 @@ class MuteModal(discord.ui.Modal):
         super().__init__(title="Silenciar membro" if mutar else "Remover silenciamento", timeout=180)
         self.owner_id = owner_id
         self.mutar = mutar
-        self.user_id_input = discord.ui.TextInput(label="ID do membro", max_length=25)
+        self.user_id_input = discord.ui.TextInput(label="Nome ou menção do membro", max_length=100)
         self.add_item(self.user_id_input)
         self.duracao = None
         if mutar:
@@ -3650,9 +3650,8 @@ class MuteModal(discord.ui.Modal):
             await interaction.response.send_message("Você precisa da permissão de moderar membros para usar essa função.", ephemeral=True)
             return
         try:
-            uid = int(str(self.user_id_input.value).strip())
-            member = interaction.guild.get_member(uid)
-            if member is None or member.id == interaction.user.id or member.top_role >= interaction.user.top_role:
+            member, erro_membro = buscar_membro_por_nome(interaction.guild, self.user_id_input.value)
+            if erro_membro or member is None or member.id == interaction.user.id or member.top_role >= interaction.user.top_role:
                 raise ValueError
             if self.mutar:
                 minutos = int(str(self.duracao.value).strip())
@@ -3670,7 +3669,7 @@ class MuteModal(discord.ui.Modal):
                 )
                 resposta = f"🔊 O silenciamento de {member.mention} foi removido."
         except ValueError:
-            await interaction.response.send_message("ID, duração inválida ou membro com cargo igual/superior ao seu. A duração deve ser de 1 a 40320 minutos.", ephemeral=True)
+            await interaction.response.send_message("Membro não encontrado, duração inválida ou membro com cargo igual/superior ao seu. A duração deve ser de 1 a 40320 minutos.", ephemeral=True)
             return
         except discord.Forbidden:
             await interaction.response.send_message("Não tenho permissão para silenciar esse membro. Verifique a permissão Moderar membros e a hierarquia dos cargos.", ephemeral=True)
@@ -4684,13 +4683,13 @@ class CargoJogadorModal(discord.ui.Modal):
         self.guild_id = guild_id
 
         self.user_id_input = discord.ui.TextInput(
-            label="ID do membro",
-            max_length=25
+            label="Nome ou menção do membro",
+            max_length=100
         )
 
         self.role_id_input = discord.ui.TextInput(
-            label="ID do cargo",
-            max_length=25
+            label="Nome exato do cargo",
+            max_length=100
         )
 
         self.add_item(self.user_id_input)
@@ -4721,19 +4720,15 @@ class CargoJogadorModal(discord.ui.Modal):
             )
             return
 
-        try:
-            user_id = int(str(self.user_id_input.value))
-            role_id = int(str(self.role_id_input.value))
-        except ValueError:
-            await interaction.response.send_message(
-                "IDs inválidos.",
-                ephemeral=True
-            )
+        membro, erro_membro = buscar_membro_por_nome(interaction.guild, self.user_id_input.value)
+        nome_cargo = " ".join(str(self.role_id_input.value).split()).casefold()
+        cargos = [r for r in interaction.guild.roles if r.name.casefold() == nome_cargo]
+        cargo = cargos[0] if len(cargos) == 1 else None
+        if erro_membro or cargo is None:
+            await interaction.response.send_message(erro_membro or "Cargo não encontrado ou nome duplicado. Informe o nome exato.", ephemeral=True)
             return
 
         guild = interaction.guild
-        membro = guild.get_member(user_id)
-        cargo = guild.get_role(role_id)
 
         if membro is None or cargo is None:
             await interaction.response.send_message(
