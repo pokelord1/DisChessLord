@@ -3674,21 +3674,113 @@ def calcular_custo_atividade(guild, guild_id, moedas, nome_cargo):
     return moedas,cargo,preco,base+taxa,taxa
 
 
-def iniciar_atividade_com_cobranca(interaction,item,tipo):
-    if item.get("started_at"): return False,"Esta atividade já foi iniciada."
-    try: moedas,cargo,preco,total,taxa=calcular_custo_atividade(interaction.guild,interaction.guild_id,item.get("prize_chesscoins",0),item.get("prize_role_name",""))
-    except ValueError as e: return False,str(e)
-    saldo=obter_chesscoins(interaction.user.id)
-    if saldo<total: return False,f"Saldo insuficiente: custo **{total:,}**, saldo **{saldo:,}**."
-    anterior=copiar_json(item)
-    if not alterar_chesscoins(interaction.user.id,-total): return False,"Não foi possível cobrar."
-    agora=agora_utc()
-    status_inicio = {"evento":"ativo","torneio":"inscricoes","sorteio":"aberto"}.get(tipo,"ativo")
-    item.update(started_at=agora.isoformat(),charged_coins=total,fee_charged=taxa,prize_role_id=str(cargo.id) if cargo else None,prize_role_name=cargo.name if cargo else None,prize_role_price=preco,status=status_inicio,ends_at=(agora+timedelta(hours=int(item.get("duration_hours",24)))).isoformat())
-    if not salvar_admin():
-        item.clear();item.update(anterior);alterar_chesscoins(interaction.user.id,total)
-        return False,"Falha ao salvar; cobrança revertida."
-    return True,f"Iniciado! Cobrança: **{total:,} ChessCoins** (taxa: {taxa:,})."
+def iniciar_atividade_com_cobranca(interaction, item, tipo, pagamento="coins"):
+    if item.get("started_at"):
+        return False, "Esta atividade já foi iniciada."
+    try:
+        moedas, cargo, preco, total, taxa = calcular_custo_atividade(
+            interaction.guild, interaction.guild_id,
+            item.get("prize_chesscoins", 0), item.get("prize_role_name", "")
+        )
+    except ValueError as erro:
+        return False, str(erro)
+    dados = obter_dados_usuario(interaction.user.id)
+    anterior = copiar_json(item)
+    saldo_anterior = int(dados.get("command_tickets", 0))
+    if pagamento == "ticket":
+        if saldo_anterior < 1:
+            return False, "Você não tem ticket administrativo. É necessário 1 ticket para iniciar esta atividade."
+        dados["command_tickets"] = saldo_anterior - 1
+    else:
+        saldo = obter_chesscoins(interaction.user.id)
+        if saldo < total:
+            return False, f"Saldo insuficiente: custo **{total:,} ChessCoins**, saldo **{saldo:,}**."
+        if not alterar_chesscoins(interaction.user.id, -total):
+            return False, "Não foi possível cobrar."
+    agora = agora_utc()
+    status_inicio = {"evento": "ativo", "torneio": "inscricoes", "sorteio": "aberto"}.get(tipo, "ativo")
+    item.update(
+        started_at=agora.isoformat(),
+        charged_coins=total if pagamento == "coins" else 0,
+        charged_tickets=1 if pagamento == "ticket" else 0,
+        payment_method=pagamento,
+        fee_charged=taxa if pagamento == "coins" else 0,
+        prize_role_id=str(cargo.id) if cargo else None,
+        prize_role_name=cargo.name if cargo else None,
+        prize_role_price=preco,
+        status=status_inicio,
+        ends_at=(agora + timedelta(hours=int(item.get("duration_hours", 24)))).isoformat()
+    )
+    if not salvar_admin() or (pagamento == "ticket" and not salvar_dados()):
+        item.clear()
+        item.update(anterior)
+        if pagamento == "ticket":
+            dados["command_tickets"] = saldo_anterior
+            salvar_dados()
+        else:
+            alterar_chesscoins(interaction.user.id, total)
+        return False, "Falha ao salvar; cobrança revertida."
+    if pagamento == "ticket":
+        return True, "Iniciado! Pagamento: **1 ticket administrativo** (cobre o custo completo)."
+    return True, f"Iniciado! Cobrança: **{total:,} ChessCoins** (taxa: {taxa:,})."
+
+
+class PaymentChoiceView(discord.ui.View):
+    def __init__(self, owner_id, item, tipo, total):
+        super().__init__(timeout=120)
+        self.owner_id, self.item, self.tipo = owner_id, item, tipo
+        self.pagamento = "coins"
+        self.add_item(discord.ui.Select(
+            placeholder="Escolha como pagar",
+            min_values=1, max_values=1,
+            options=[
+                discord.SelectOption(label=f"{total:,} ChessCoins", value="coins", description="Paga o custo calculado completo."),
+                discord.SelectOption(label="1 ticket administrativo", value="ticket", description="Um ticket cobre todo o custo.")
+            ]
+        ))
+        self.children[0].callback = self.selecionar
+
+    async def selecionar(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Este menu pertence a outro administrador.", ephemeral=True)
+            return
+        self.pagamento = self.children[0].values[0]
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Confirmar início", emoji="▶️", style=discord.ButtonStyle.success)
+    async def confirmar(self, interaction, button):
+        if interaction.user.id != self.owner_id or not autorizado_gestor_atividade(interaction):
+            await interaction.response.send_message("Sem autorização.", ephemeral=True)
+            return
+        ok, msg = iniciar_atividade_com_cobranca(interaction, self.item, self.tipo, self.pagamento)
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content=msg, embed=None, view=self)
+
+
+def enviar_selecao_pagamento(interaction, item, tipo):
+    try:
+        _, _, _, total, _ = calcular_custo_atividade(
+            interaction.guild, interaction.guild_id,
+            item.get("prize_chesscoins", 0), item.get("prize_role_name", "")
+        )
+    except ValueError as erro:
+        return interaction.response.send_message(str(erro), ephemeral=True)
+    embed = discord.Embed(
+        title="Confirmar início",
+        description=(
+            f"Atividade: **{item.get('name', 'Sem nome')}**\\n"
+            f"Custo calculado: **{total:,} ChessCoins** (inclui taxa de 1%)\\n"
+            "Ou pague com **1 ticket administrativo**, que cobre o custo inteiro.\\n"
+            "Escolha a forma de pagamento e confirme."
+        ),
+        color=discord.Color.gold()
+    )
+    return interaction.response.send_message(
+        embed=embed,
+        view=PaymentChoiceView(interaction.user.id, item, tipo, total),
+        ephemeral=True
+    )
 
 
 class SorteioCriarModal(discord.ui.Modal):
@@ -3850,8 +3942,7 @@ class GerenciarSorteioModal(discord.ui.Modal):
             await i.response.send_message(embed=discord.Embed(title=r.get("name","Sorteio"),description=f"ID: {rid}\\nStatus: {r.get('status')}\\nPrêmio: {r.get('prize')}"),ephemeral=True);return
         old=copiar_json(r)
         if self.acao=="iniciar":
-            ok,msg=iniciar_atividade_com_cobranca(i,r,"sorteio")
-            await i.response.send_message(msg,ephemeral=True)
+            await enviar_selecao_pagamento(i, r, "sorteio")
             return
         elif self.acao=="cancelar": r.update(status="cancelado",cancelled_at=data_iso())
         elif self.acao=="encerrar":
@@ -5076,8 +5167,7 @@ class EventoIdModal(discord.ui.Modal):
             return
 
         if self.acao == "iniciar":
-            ok, msg = iniciar_atividade_com_cobranca(interaction, evento, "evento")
-            await interaction.response.send_message(msg, ephemeral=True)
+            await enviar_selecao_pagamento(interaction, evento, "evento")
             return
 
         evento_anterior = copiar_json(evento)
@@ -5409,8 +5499,7 @@ class TorneioIdModal(discord.ui.Modal):
             return
 
         if self.acao == "iniciar":
-            ok, msg = iniciar_atividade_com_cobranca(interaction, torneio, "torneio")
-            await interaction.response.send_message(msg, ephemeral=True)
+            await enviar_selecao_pagamento(interaction, torneio, "torneio")
             return
 
         anterior = copiar_json(torneio)
