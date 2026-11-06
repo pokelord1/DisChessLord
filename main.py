@@ -4450,9 +4450,9 @@ class JogadorEloModal(discord.ui.Modal):
         self.owner_id = owner_id
 
         self.user_id_input = discord.ui.TextInput(
-            label="ID do jogador",
-            placeholder="Ex.: 123456789012345678",
-            max_length=25
+            label="Nome ou menção do jogador",
+            placeholder="Nome exato ou @menção",
+            max_length=100
         )
 
         self.elo_input = discord.ui.TextInput(
@@ -4475,8 +4475,10 @@ class JogadorEloModal(discord.ui.Modal):
             )
             return
 
+        membro, erro = buscar_membro_por_nome(interaction.guild, self.user_id_input.value)
         try:
-            user_id = int(str(self.user_id_input.value))
+            if erro: raise ValueError
+            user_id = membro.id
             novo_elo = int(str(self.elo_input.value))
 
             if novo_elo < 0 or novo_elo > 1000000:
@@ -4484,7 +4486,7 @@ class JogadorEloModal(discord.ui.Modal):
 
         except ValueError:
             await interaction.response.send_message(
-                "ID ou ELO inválido.",
+                "Jogador não encontrado ou ELO inválido.",
                 ephemeral=True
             )
             return
@@ -4516,7 +4518,7 @@ class JogadorEloModal(discord.ui.Modal):
                 return
 
         await interaction.response.send_message(
-            f"✅ ELO de `{user_id}` alterado para **{novo_elo}**.",
+            f"✅ ELO de **{membro.display_name}** alterado para **{novo_elo}**.",
             ephemeral=True
         )
 
@@ -4531,8 +4533,8 @@ class JogadorPatenteModal(discord.ui.Modal):
         self.owner_id = owner_id
 
         self.user_id_input = discord.ui.TextInput(
-            label="ID do jogador",
-            max_length=25
+            label="Nome ou menção do jogador",
+            max_length=100
         )
 
         self.patente_input = discord.ui.TextInput(
@@ -4555,11 +4557,10 @@ class JogadorPatenteModal(discord.ui.Modal):
             )
             return
 
-        try:
-            user_id = int(str(self.user_id_input.value))
-        except ValueError:
+        membro, erro = buscar_membro_por_nome(interaction.guild, self.user_id_input.value)
+        if erro:
             await interaction.response.send_message(
-                "ID inválido.",
+                erro,
                 ephemeral=True
             )
             return
@@ -4639,11 +4640,10 @@ class JogadorTituloModal(discord.ui.Modal):
             )
             return
 
-        try:
-            user_id = int(str(self.user_id_input.value))
-        except ValueError:
+        membro, erro = buscar_membro_por_nome(interaction.guild, self.user_id_input.value)
+        if erro:
             await interaction.response.send_message(
-                "ID inválido.",
+                erro,
                 ephemeral=True
             )
             return
@@ -5040,11 +5040,7 @@ class EventoIdModal(discord.ui.Modal):
             )
 
             embed.add_field(
-                name="ID",
-                value=evento_id
-            )
-
-            embed.add_field(
+                 embed.add_field(
                 name="Status",
                 value=evento.get("status", "desconhecido")
             )
@@ -5089,7 +5085,7 @@ class EventoIdModal(discord.ui.Modal):
             return
 
         await interaction.response.send_message(
-            f"Evento `{evento_id}` atualizado.",
+            f"Evento **{evento['name']}** atualizado.",
             ephemeral=True
         )
 
@@ -5656,7 +5652,7 @@ class CriarPecaModal(discord.ui.Modal):
         await interaction.response.send_message(
             embed=embed_sucesso(
                 f"Peça **{peca['name']}** criada.\n"
-                f"ID: `{peca_id}`\n"
+                ""
                 f"Símbolo: {peca['symbol']}\n"
                 "Ela foi salva na biblioteca."
             ),
@@ -5674,8 +5670,8 @@ class EditarPecaModal(discord.ui.Modal):
         self.owner_id = owner_id
 
         self.peca_id = discord.ui.TextInput(
-            label="ID da peça",
-            max_length=12
+            label="Nome exato da peça",
+            max_length=40
         )
 
         self.nome = discord.ui.TextInput(
@@ -5762,7 +5758,7 @@ class EditarPecaModal(discord.ui.Modal):
             return
 
         await interaction.response.send_message(
-            f"Peça `{peca_id}` atualizada.",
+            f"Peça **{peca['name']}** atualizada.",
             ephemeral=True
         )
 
@@ -6017,8 +6013,8 @@ class PosicionamentoPecaModal(discord.ui.Modal):
         self.guild_id = guild_id
 
         self.peca_id = discord.ui.TextInput(
-            label="ID da peça personalizada",
-            max_length=12
+            label="Nome exato da peça personalizada",
+            max_length=40
         )
 
         self.casas = discord.ui.TextInput(
