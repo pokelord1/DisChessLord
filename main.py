@@ -4559,7 +4559,7 @@ class JogadorPatenteModal(discord.ui.Modal):
         self.owner_id = owner_id
 
         self.user_id_input = discord.ui.TextInput(
-            label="Nome ou menção do jogador",
+            label="Nick global do jogador",
             max_length=100
         )
 
@@ -4640,7 +4640,7 @@ class JogadorTituloModal(discord.ui.Modal):
         self.owner_id = owner_id
 
         self.user_id_input = discord.ui.TextInput(
-            label="Nome ou menção do jogador",
+            label="Nick global do jogador",
             max_length=100
         )
 
