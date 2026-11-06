@@ -2789,11 +2789,11 @@ async def historico(
     description="Veja o PGN de uma partida."
 )
 @app_commands.describe(
-    partida_id="ID da partida (opcional)"
+    numero_partida="Número sequencial da partida (opcional; vazio = mais recente)"
 )
 async def analisar(
     interaction,
-    partida_id: str = None
+    numero_partida: app_commands.Range[int, 1, 1000000] = None
 ):
     dados = obter_dados_usuario(
         interaction.user.id
@@ -2810,9 +2810,9 @@ async def analisar(
 
     partida = None
 
-    if partida_id:
+    if numero_partida is not None:
         for item in partidas:
-            if item["id"].upper() == partida_id.upper():
+            if str(item.get("id")) == str(numero_partida):
                 partida = item
                 break
     else:
@@ -5288,6 +5288,49 @@ async def torneios(interaction):
     await interaction.response.send_message(
         embed=embed
     )
+
+
+@bot.tree.command(
+    name="historico_torneio",
+    description="Veja o histórico de torneios encerrados ou cancelados."
+)
+async def historico_torneio(interaction):
+    if interaction.guild_id is None:
+        await interaction.response.send_message(
+            "Use este comando em um servidor.", ephemeral=True
+        )
+        return
+
+    lista = [
+        t for t in torneios_do_servidor(interaction.guild_id)
+        if t.get("status") not in ("inscricoes", "em_andamento", "ativo")
+    ]
+    if not lista:
+        await interaction.response.send_message(
+            "Ainda não há torneios encerrados ou cancelados.", ephemeral=True
+        )
+        return
+
+    linhas = []
+    for torneio in lista[:10]:
+        vencedor_id = torneio.get("winner")
+        vencedor = (
+            nome_jogador(vencedor_id, interaction.guild)
+            if vencedor_id else "Não definido"
+        )
+        linhas.append(
+            f"🏆 **{torneio.get('name', 'Torneio')}**\n"
+            f"Status: **{torneio.get('status', 'encerrado')}** • "
+            f"Prêmio: **{torneio.get('prize') or 'Não definido'}**\n"
+            f"Vencedor: **{vencedor}**"
+        )
+
+    embed = discord.Embed(
+        title="📚 Histórico de torneios",
+        description="\n\n".join(linhas),
+        color=discord.Color.blurple()
+    )
+    await interaction.response.send_message(embed=embed)
 
 
 # ============================================================
