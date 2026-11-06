@@ -2285,12 +2285,11 @@ class ChessBoardView(discord.ui.View):
             self.page = 0
             self.rebuild()
 
-            # Existe apenas um tabuleiro: o publicado no servidor de quem começa.
+            # Sincroniza a seleção nas duas DMs e no tabuleiro público.
             await interaction.response.edit_message(
                 embed=criar_embed_partida(self.game),
                 view=self
             )
-            await sincronizar_interfaces_partida(self.game)
             await sincronizar_interfaces_partida(self.game)
 
     def criar_callback_movimento(self, move):
@@ -2863,6 +2862,8 @@ class ConfirmDesistenciaView(discord.ui.View):
 async def sincronizar_interfaces_partida(game, embed=None, final=False):
     """Atualiza os dois tabuleiros privados e as cópias públicas sem controles."""
     embed = embed or criar_embed_partida(game)
+    if final:
+        game["final_embed"] = embed
     for user_id, message in list(game.get("dm_messages", {}).items()):
         try:
             view = RevancheView(game) if final else ChessBoardView(game)
@@ -3565,37 +3566,87 @@ class RevancheView(discord.ui.View):
     def __init__(self, game):
         super().__init__(timeout=86400)
         self.game = game
-        self.requester = None
 
     @discord.ui.button(label="Revanche", emoji="🔁", style=discord.ButtonStyle.primary)
     async def revanche(self, interaction, button):
         if not await exigir_nick(interaction):
             return
         old = self.game
+        if interaction.user.id not in (old["white"], old["black"]):
+            await interaction.response.send_message(
+                "Somente os jogadores desta partida podem pedir revanche.",
+                ephemeral=True
+            )
+            return
         outro_id = old["black"] if interaction.user.id == old["white"] else old["white"]
         if not usuario_tem_nick(outro_id):
-            await interaction.response.send_message("O outro jogador ainda não possui nick. A revanche não pode começar.", ephemeral=True)
+            await interaction.response.send_message(
+                "O outro jogador ainda não possui nick. A revanche não pode começar.",
+                ephemeral=True
+            )
             return
-        if interaction.user.id not in (old["white"], old["black"]):
-            await interaction.response.send_message("Somente os jogadores desta partida podem pedir revanche.", ephemeral=True)
+
+        solicitante = old.get("rematch_requester")
+        if solicitante is None:
+            old["rematch_requester"] = interaction.user.id
+            await interaction.response.edit_message(
+                content=f"🔁 {nome_jogador(interaction.user.id)} pediu revanche! O outro jogador deve aceitar pela DM.",
+                embed=old.get("final_embed"),
+                view=self
+            )
+            await sincronizar_interfaces_partida(
+                old, embed=old.get("final_embed"), final=True
+            )
             return
-        if self.requester is None:
-            self.requester = interaction.user.id
-            await interaction.response.edit_message(content=f"🔁 {interaction.user.mention} pediu revanche! O outro jogador deve clicar para aceitar.", view=self)
+
+        if solicitante == interaction.user.id:
+            await interaction.response.send_message(
+                "Aguardando o outro jogador aceitar.",
+                ephemeral=True
+            )
             return
-        if self.requester == interaction.user.id:
-            await interaction.response.send_message("Aguardando o outro jogador aceitar.", ephemeral=True)
-            return
+
         tid = old["channel_id"]
         if tid in active_games:
-            await interaction.response.send_message("Já existe uma partida ativa nesta mesa.", ephemeral=True)
+            await interaction.response.send_message(
+                "Já existe uma partida ativa nesta mesa.",
+                ephemeral=True
+            )
             return
-        game = criar_partida(old["white"], old["black"], tid, old.get("guild_id"))
+
+        game = criar_partida(
+            old["white"], old["black"], tid, old.get("guild_id")
+        )
         game["elo_enabled"] = old.get("elo_enabled", True)
         game["room_name"] = old.get("room_name")
+        game["message"] = old.get("message")
+        game["public_messages"] = list(old.get("public_messages", []))
+        game["dm_messages"] = dict(old.get("dm_messages", {}))
         active_games[tid] = game
-        game["message"] = interaction.message
-        await interaction.response.edit_message(content="🔁 Revanche aceita! Nova partida iniciada.", embed=criar_embed_partida(game), view=ChessBoardView(game))
+
+        embed = criar_embed_partida(game)
+        await interaction.response.edit_message(
+            content="🔁 Revanche aceita! A nova partida começou. Joguem pela DM.",
+            embed=embed,
+            view=ChessBoardView(game)
+        )
+        game["dm_messages"][int(interaction.user.id)] = interaction.message
+
+        for uid, message in game["dm_messages"].items():
+            if int(uid) == int(interaction.user.id):
+                continue
+            try:
+                await message.edit(
+                    content="🔁 Revanche aceita! A nova partida começou. Joguem pela DM.",
+                    embed=embed,
+                    view=ChessBoardView(game)
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                logging.exception("Falha ao reiniciar a DM da revanche do jogador %s.", uid)
+
+        await sincronizar_interfaces_partida(game, embed=embed)
+
+
 
 
 @bot.tree.command(name="jogar", description="Entre, crie ou encontre uma mesa de xadrez.")
