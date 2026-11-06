@@ -3391,16 +3391,36 @@ class AdmDashboardView(discord.ui.View):
 
 @bot.tree.command(name="adm_dashboard", description="Abre o painel de moderação do servidor.")
 async def adm_dashboard(interaction):
-    if not autorizado_adm(interaction):
-        await interaction.response.send_message("Você precisa de permissão de moderação ou administração.", ephemeral=True)
-        return
-    view = AdmDashboardView(interaction.user.id, interaction.guild_id)
-    await interaction.response.send_message(
-        embed=discord.Embed(title="🛡️ DisChessLord — Painel de moderação",
-                            description="Moderação e consulta de atividades do servidor.",
-                            color=discord.Color.blurple()),
-        view=view, ephemeral=True
-    )
+    # Reconhece a interação imediatamente para evitar expiração dos 3 segundos.
+    await interaction.response.defer(ephemeral=True)
+    try:
+        if interaction.guild is None or not autorizado_adm(interaction):
+            await interaction.edit_original_response(
+                content="Você precisa de permissão de moderação ou administração em um servidor.",
+                embed=None,
+                view=None
+            )
+            return
+
+        view = AdmDashboardView(interaction.user.id, interaction.guild_id)
+        await interaction.edit_original_response(
+            content=None,
+            embed=discord.Embed(
+                title="🛡️ DisChessLord — Painel de moderação",
+                description="Moderação e consulta de atividades.",
+                color=discord.Color.blurple()
+            ),
+            view=view
+        )
+    except Exception:
+        logging.exception("Erro ao abrir /adm_dashboard")
+        if interaction.is_expired():
+            return
+        await interaction.edit_original_response(
+            content="Ocorreu um erro ao abrir o painel. O erro foi registrado nos logs.",
+            embed=None,
+            view=None
+        )
 
 
 @bot.tree.command(name="sorteios", description="Veja os sorteios abertos.")
