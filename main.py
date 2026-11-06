@@ -2283,10 +2283,30 @@ class ChessBoardView(discord.ui.View):
             self.page = 0
             self.rebuild()
 
+            # Atualiza também o tabuleiro do outro servidor. Assim, quando
+            # chegar a vez do adversário, ele terá os controles das próprias peças.
             await interaction.response.edit_message(
                 embed=criar_embed_partida(self.game),
                 view=self
             )
+            mensagem_principal = self.game.get("message")
+            mensagem_espelho = self.game.get("mirror_message")
+            if mensagem_principal and mensagem_espelho:
+                outra_mensagem = (
+                    mensagem_espelho
+                    if interaction.message.id == mensagem_principal.id
+                    else mensagem_principal
+                )
+                try:
+                    outra_view = ChessBoardView(self.game)
+                    if outra_mensagem.id == mensagem_espelho.id:
+                        self.game["mirror_view"] = outra_view
+                    await outra_mensagem.edit(
+                        embed=criar_embed_partida(self.game),
+                        view=outra_view
+                    )
+                except discord.HTTPException:
+                    logging.exception("Falha ao sincronizar seleção de peça entre servidores.")
 
     def criar_callback_movimento(self, move):
 
@@ -2809,7 +2829,7 @@ class ConfirmDesistenciaView(discord.ui.View):
                 self.game,
                 "♟️ DisChessLord — Desistência",
                 (
-                    f"{interaction.user.mention} desistiu.\n"
+                    f"**{nome_jogador(interaction.user.id)}** desistiu.\n"
                     f"**{vencedor}**"
                 ),
                 resultado_elo
