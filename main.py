@@ -3544,7 +3544,8 @@ def iniciar_atividade_com_cobranca(interaction,item,tipo):
     anterior=copiar_json(item)
     if not alterar_chesscoins(interaction.user.id,-total): return False,"Não foi possível cobrar."
     agora=agora_utc()
-    item.update(started_at=agora.isoformat(),charged_coins=total,fee_charged=taxa,prize_role_id=str(cargo.id) if cargo else None,prize_role_name=cargo.name if cargo else None,prize_role_price=preco,status="ativo" if tipo=="evento" else "inscricoes",ends_at=(agora+timedelta(hours=int(item.get("duration_hours",24)))).isoformat())
+    status_inicio = {"evento":"ativo","torneio":"inscricoes","sorteio":"aberto"}.get(tipo,"ativo")
+    item.update(started_at=agora.isoformat(),charged_coins=total,fee_charged=taxa,prize_role_id=str(cargo.id) if cargo else None,prize_role_name=cargo.name if cargo else None,prize_role_price=preco,status=status_inicio,ends_at=(agora+timedelta(hours=int(item.get("duration_hours",24)))).isoformat())
     if not salvar_admin():
         item.clear();item.update(anterior);alterar_chesscoins(interaction.user.id,total)
         return False,"Falha ao salvar; cobrança revertida."
@@ -3556,9 +3557,11 @@ class SorteioCriarModal(discord.ui.Modal):
         super().__init__(title="Criar sorteio", timeout=180)
         self.owner_id = owner_id
         self.nome = discord.ui.TextInput(label="Nome do sorteio", max_length=80)
-        self.premio = discord.ui.TextInput(label="Prêmio", max_length=150)
+        self.premio_moedas = discord.ui.TextInput(label="Premiação em ChessCoins (opcional)",required=False,max_length=6)
+        self.premio_cargo = discord.ui.TextInput(label="Cargo da premiação (opcional)",required=False,max_length=100)
         self.add_item(self.nome)
-        self.add_item(self.premio)
+        self.add_item(self.premio_moedas)
+        self.add_item(self.premio_cargo)
 
     async def on_submit(self, interaction):
         if interaction.user.id != self.owner_id or not autorizado_adm(interaction):
@@ -3570,14 +3573,19 @@ class SorteioCriarModal(discord.ui.Modal):
             await interaction.response.send_message("Você precisa de 1 ticket administrativo para criar um sorteio. Peça ao desenvolvedor para distribuir tickets.", ephemeral=True)
             return
         nome = " ".join(str(self.nome.value).split())
-        premio = str(self.premio.value).strip()
-        if not nome or not premio:
-            await interaction.response.send_message("Informe o nome e o prêmio.", ephemeral=True)
-            return
+        try:
+            moedas=int(str(self.premio_moedas.value or "0").strip() or "0")
+            if moedas<0 or moedas>10000: raise ValueError
+        except ValueError:
+            await interaction.response.send_message("Premiação em ChessCoins inválida. Use de 0 a 10.000.",ephemeral=True);return
+        cargo_nome=str(self.premio_cargo.value).strip()
+        if not nome or (not moedas and not cargo_nome):
+            await interaction.response.send_message("Informe o nome e pelo menos uma premiação: ChessCoins ou cargo.",ephemeral=True);return
         rid = gerar_id()
         admin_data.setdefault("raffles", {})[rid] = {
             "id": rid, "name": nome,
-            "prize": premio, "ticket_cost": 0,
+            "prize": f"{moedas:,} ChessCoins" if moedas else "Cargo: "+cargo_nome,
+            "prize_chesscoins": moedas, "prize_role_name": cargo_nome, "ticket_cost": 0,
             "status": "preparacao", "entries": {}, "created_at": data_iso(),
             "guild_id": interaction.guild_id, "channel_id": interaction.channel_id,
             "created_by": interaction.user.id
@@ -3709,8 +3717,9 @@ class GerenciarSorteioModal(discord.ui.Modal):
             await i.response.send_message(embed=discord.Embed(title=r.get("name","Sorteio"),description=f"ID: {rid}\\nStatus: {r.get('status')}\\nPrêmio: {r.get('prize')}"),ephemeral=True);return
         old=copiar_json(r)
         if self.acao=="iniciar":
-            if r.get("status")!="preparacao": await i.response.send_message("Sorteio não está aguardando início.",ephemeral=True);return
-            r.update(status="aberto",started_at=data_iso())
+            ok,msg=iniciar_atividade_com_cobranca(i,r,"sorteio")
+            await i.response.send_message(msg,ephemeral=True)
+            return
         elif self.acao=="cancelar": r.update(status="cancelado",cancelled_at=data_iso())
         elif self.acao=="encerrar":
             w=[(u,int(n)) for u,n in r.get("entries",{}).items() if int(n)>0];total=sum(n for _,n in w);winner=None
@@ -3762,11 +3771,11 @@ class AtividadeAdmView(discord.ui.View):
 
     def criar_embed(self):
         eventos = [x for x in admin_data.get("events", {}).values()
-                   if x.get("status") in ("ativo", "aberto") and str(x.get("guild_id")) == str(self.guild_id)]
+                   if x.get("status") in ("ativo", "aberto", "preparacao") and str(x.get("guild_id")) == str(self.guild_id)]
         torneios = [x for x in admin_data.get("tournaments", {}).values()
-                    if x.get("status") in ("inscricoes", "inscrições", "ativo") and str(x.get("guild_id")) == str(self.guild_id)]
+                    if x.get("status") in ("inscricoes", "inscrições", "ativo", "preparacao") and str(x.get("guild_id")) == str(self.guild_id)]
         sorteios = [x for x in admin_data.get("raffles", {}).values()
-                    if x.get("status") == "aberto" and str(x.get("guild_id")) == str(self.guild_id)]
+                    if x.get("status") in ("aberto","preparacao") and str(x.get("guild_id")) == str(self.guild_id)]
 
         def linhas(items):
             return "\n".join("• " + str(x.get("name", "Sem nome")) for x in items[:8]) or "Nenhum"
