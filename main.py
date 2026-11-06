@@ -2108,10 +2108,7 @@ def criar_embed_final(
 ):
     embed = discord.Embed(
         title=titulo,
-        description=(
-            f"{desenhar_tabuleiro(game['board'])}\n"
-            f"{descricao}"
-        ),
+        description=descricao,
         color=discord.Color.gold()
     )
 
