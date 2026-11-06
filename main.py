@@ -459,7 +459,8 @@ def dados_admin_padrao():
         "events": {},
         "tournaments": {},
         "pieces": {},
-        "settings": {}
+        "settings": {},
+        "raffles": {}
     }
 
 
@@ -489,7 +490,8 @@ def carregar_admin():
             "events",
             "tournaments",
             "pieces",
-            "settings"
+            "settings",
+            "raffles"
         ):
             if not isinstance(padrao[chave], dict):
                 raise ValueError(
@@ -3175,6 +3177,253 @@ async def resetar(
     view.message = await interaction.original_response()
 
 
+
+# ============================================================
+# DASHBOARDS DE MODERAÇÃO E SORTEIOS
+# ============================================================
+
+def autorizado_adm(interaction):
+    if interaction.guild is None:
+        return False
+    p = interaction.user.guild_permissions
+    return p.administrator or p.manage_guild or p.moderate_members
+
+
+class TimeoutModal(discord.ui.Modal):
+    def __init__(self, owner_id, guild_id, remover=False):
+        super().__init__(title="Retirar timeout" if remover else "Aplicar timeout", timeout=180)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.remover = remover
+        self.user_id_input = discord.ui.TextInput(label="ID do usuário", max_length=25)
+        self.add_item(self.user_id_input)
+        if not remover:
+            self.minutes_input = discord.ui.TextInput(label="Duração em minutos (1 a 40320)", max_length=5)
+            self.reason_input = discord.ui.TextInput(label="Motivo", required=False, max_length=300)
+            self.add_item(self.minutes_input)
+            self.add_item(self.reason_input)
+
+    async def on_submit(self, interaction):
+        if interaction.user.id != self.owner_id or not autorizado_adm(interaction):
+            await interaction.response.send_message("Sem autorização.", ephemeral=True)
+            return
+        try:
+            member = interaction.guild.get_member(int(str(self.user_id_input.value)))
+            if member is None or member.id == interaction.user.id or member.top_role >= interaction.user.top_role:
+                raise ValueError
+            if self.remover:
+                await member.timeout(None, reason=f"Timeout removido por {interaction.user}")
+                msg = f"Timeout removido de {member.mention}."
+            else:
+                minutes = int(str(self.minutes_input.value))
+                if not 1 <= minutes <= 40320:
+                    raise ValueError
+                reason = str(self.reason_input.value).strip() or "Sem motivo informado"
+                await member.timeout(datetime.now(timezone.utc) + timedelta(minutes=minutes), reason=reason)
+                msg = f"Timeout aplicado em {member.mention} por {minutes} minuto(s)."
+        except ValueError:
+            await interaction.response.send_message("ID, hierarquia ou duração inválida. O alvo precisa estar abaixo de você.", ephemeral=True)
+            return
+        except discord.Forbidden:
+            await interaction.response.send_message("Não tenho permissão ou o cargo do alvo é superior ao meu.", ephemeral=True)
+            return
+        await interaction.response.send_message("✅ " + msg, ephemeral=True)
+
+
+class SorteioCriarModal(discord.ui.Modal):
+    def __init__(self, owner_id):
+        super().__init__(title="Criar sorteio", timeout=180)
+        self.owner_id = owner_id
+        self.nome = discord.ui.TextInput(label="Nome do sorteio", max_length=80)
+        self.premio = discord.ui.TextInput(label="Prêmio", max_length=150)
+        self.custo = discord.ui.TextInput(label="Tickets por participação", default="1", max_length=3)
+        self.add_item(self.nome)
+        self.add_item(self.premio)
+        self.add_item(self.custo)
+
+    async def on_submit(self, interaction):
+        if interaction.user.id != self.owner_id or not autorizado_dev(interaction.user.id):
+            await interaction.response.send_message("Sem autorização.", ephemeral=True)
+            return
+        try:
+            custo = int(str(self.custo.value))
+            if custo < 1 or custo > 100:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("O custo deve ser de 1 a 100 tickets.", ephemeral=True)
+            return
+        rid = gerar_id()
+        admin_data.setdefault("raffles", {})[rid] = {
+            "id": rid, "name": str(self.nome.value).strip(),
+            "prize": str(self.premio.value).strip(), "ticket_cost": custo,
+            "status": "aberto", "entries": {}, "created_at": data_iso(),
+            "guild_id": interaction.guild_id, "channel_id": interaction.channel_id
+        }
+        if not salvar_admin():
+            admin_data["raffles"].pop(rid, None)
+            await interaction.response.send_message("Falha ao salvar o sorteio.", ephemeral=True)
+            return
+        await interaction.response.send_message(f"🎟️ Sorteio **{self.nome.value}** criado. ID: `{rid}`", ephemeral=True)
+
+
+class TicketsModal(discord.ui.Modal):
+    def __init__(self, owner_id):
+        super().__init__(title="Distribuir tickets", timeout=180)
+        self.owner_id = owner_id
+        self.user_id = discord.ui.TextInput(label="ID do usuário", max_length=25)
+        self.quantidade = discord.ui.TextInput(label="Quantidade", max_length=6)
+        self.add_item(self.user_id)
+        self.add_item(self.quantidade)
+
+    async def on_submit(self, interaction):
+        if interaction.user.id != self.owner_id or not autorizado_dev(interaction.user.id):
+            await interaction.response.send_message("Sem autorização.", ephemeral=True)
+            return
+        try:
+            uid, qtd = int(str(self.user_id.value)), int(str(self.quantidade.value))
+            if qtd < 1 or qtd > 100000:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("ID ou quantidade inválida.", ephemeral=True)
+            return
+        dados = obter_dados_usuario(uid)
+        anterior = int(dados.get("command_tickets", 0))
+        dados["command_tickets"] = anterior + qtd
+        if not salvar_dados():
+            dados["command_tickets"] = anterior
+            await interaction.response.send_message("Falha ao salvar; saldo restaurado.", ephemeral=True)
+            return
+        await interaction.response.send_message(f"✅ {qtd} ticket(s) entregues ao usuário `{uid}`. Saldo: **{anterior + qtd}**.", ephemeral=True)
+
+
+class DevRafflesView(discord.ui.View):
+    def __init__(self, owner_id):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id or not autorizado_dev(interaction.user.id):
+            await interaction.response.send_message("Sem autorização.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Criar sorteio", emoji="🎟️", style=discord.ButtonStyle.success)
+    async def criar(self, interaction, button):
+        await interaction.response.send_modal(SorteioCriarModal(self.owner_id))
+
+    @discord.ui.button(label="Distribuir tickets", emoji="🎫", style=discord.ButtonStyle.primary)
+    async def tickets(self, interaction, button):
+        await interaction.response.send_modal(TicketsModal(self.owner_id))
+
+    @discord.ui.button(label="Encerrar sorteio", emoji="🔒", style=discord.ButtonStyle.danger)
+    async def encerrar(self, interaction, button):
+        abertos = [(k, v) for k, v in admin_data.setdefault("raffles", {}).items() if v.get("status") == "aberto"]
+        if not abertos:
+            await interaction.response.send_message("Não há sorteios abertos.", ephemeral=True)
+            return
+        rid, raffle = abertos[-1]
+        raffle["status"] = "encerrado"
+        raffle["ended_at"] = data_iso()
+        if not salvar_admin():
+            raffle["status"] = "aberto"
+            await interaction.response.send_message("Falha ao salvar.", ephemeral=True)
+            return
+        await interaction.response.send_message(f"🔒 Sorteio **{raffle['name']}** encerrado. ID: `{rid}`", ephemeral=True)
+
+
+class AdmDashboardView(discord.ui.View):
+    def __init__(self, owner_id, guild_id):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id or not autorizado_adm(interaction):
+            await interaction.response.send_message("Sem autorização para este painel.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Aplicar timeout", emoji="🔇", style=discord.ButtonStyle.danger)
+    async def timeout(self, interaction, button):
+        await interaction.response.send_modal(TimeoutModal(self.owner_id, self.guild_id))
+
+    @discord.ui.button(label="Retirar timeout", emoji="🔊", style=discord.ButtonStyle.success)
+    async def untimeout(self, interaction, button):
+        await interaction.response.send_modal(TimeoutModal(self.owner_id, self.guild_id, True))
+
+    @discord.ui.button(label="Atividade", emoji="📋", style=discord.ButtonStyle.primary)
+    async def atividade(self, interaction, button):
+        eventos = [x for x in admin_data.get("events", {}).values() if x.get("status") in ("ativo", "aberto")]
+        torneios = [x for x in admin_data.get("tournaments", {}).values() if x.get("status") in ("inscricoes", "inscrições", "ativo")]
+        sorteios = [x for x in admin_data.get("raffles", {}).values() if x.get("status") == "aberto"]
+        def linhas(items):
+            return "\n".join("• " + str(x.get("name", "Sem nome")) for x in items[:8]) or "Nenhum"
+        embed = discord.Embed(title="📋 Atividade do servidor", color=discord.Color.blurple())
+        embed.add_field(name="Eventos ativos", value=linhas(eventos), inline=False)
+        embed.add_field(name="Torneios ativos", value=linhas(torneios), inline=False)
+        embed.add_field(name="Sorteios abertos", value=linhas(sorteios), inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="adm_dashboard", description="Abre o painel de moderação do servidor.")
+async def adm_dashboard(interaction):
+    if not autorizado_adm(interaction):
+        await interaction.response.send_message("Você precisa de permissão de moderação ou administração.", ephemeral=True)
+        return
+    view = AdmDashboardView(interaction.user.id, interaction.guild_id)
+    await interaction.response.send_message(
+        embed=discord.Embed(title="🛡️ DisChessLord — Painel de moderação",
+                            description="Moderação e consulta de atividades do servidor.",
+                            color=discord.Color.blurple()),
+        view=view, ephemeral=True
+    )
+
+
+@bot.tree.command(name="sorteios", description="Veja os sorteios abertos.")
+async def sorteios(interaction):
+    abertos = [x for x in admin_data.setdefault("raffles", {}).values()
+               if x.get("status") == "aberto" and (interaction.guild_id is None or x.get("guild_id") == interaction.guild_id)]
+    if not abertos:
+        await interaction.response.send_message("Não há sorteios abertos.", ephemeral=True)
+        return
+    embed = discord.Embed(title="🎟️ Sorteios abertos", color=discord.Color.gold())
+    for x in abertos[:10]:
+        embed.add_field(name=x["name"], value=f"Prêmio: **{x['prize']}**\nCusto: **{x['ticket_cost']} ticket(s)** por entrada\nParticipantes: **{len(x.get('entries', {}))}**", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="participar_sorteio", description="Use seus tickets para entrar em um sorteio.")
+@app_commands.describe(sorteio_id="ID do sorteio aberto")
+async def participar_sorteio(interaction, sorteio_id: str):
+    raffle = admin_data.setdefault("raffles", {}).get(sorteio_id)
+    if not raffle or raffle.get("status") != "aberto" or raffle.get("guild_id") != interaction.guild_id:
+        await interaction.response.send_message("Sorteio não encontrado ou encerrado.", ephemeral=True)
+        return
+    dados = obter_dados_usuario(interaction.user.id)
+    custo = int(raffle.get("ticket_cost", 1))
+    saldo = int(dados.get("command_tickets", 0))
+    if saldo < custo:
+        await interaction.response.send_message(f"Você precisa de {custo} ticket(s). Seu saldo: {saldo}.", ephemeral=True)
+        return
+    anterior = saldo
+    dados["command_tickets"] = saldo - custo
+    entradas = raffle.setdefault("entries", {})
+    entradas[str(interaction.user.id)] = int(entradas.get(str(interaction.user.id), 0)) + 1
+    if not salvar_dados():
+        dados["command_tickets"] = anterior
+        entradas[str(interaction.user.id)] -= 1
+        await interaction.response.send_message("Falha ao salvar seus tickets.", ephemeral=True)
+        return
+    if not salvar_admin():
+        dados["command_tickets"] = anterior
+        entradas[str(interaction.user.id)] -= 1
+        salvar_dados()
+        await interaction.response.send_message("Falha ao salvar a inscrição; tickets devolvidos.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"🎟️ Você entrou em **{raffle['name']}**! Entradas: {entradas[str(interaction.user.id)]}. Tickets restantes: {dados['command_tickets']}.", ephemeral=True)
+
+
+
 # ============================================================
 # 23. DASHBOARD — MENU PRINCIPAL
 # ============================================================
@@ -3403,6 +3652,11 @@ async def dev_dashboard(interaction):
             ephemeral=True
         )
         return
+
+    view = DashboardView(
+        interaction.user.id,
+        interaction.guild_id
+    )
 
     view = DashboardView(
         interaction.user.id,
@@ -5324,13 +5578,6 @@ async def historico_torneio(interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(
-    name="torneio",
-    description="Veja os torneios ativos do servidor."
-)
-async def torneio(interaction):
-    await torneios(interaction)
-
 
 # ============================================================
 # 31. INSCRIÇÃO EM TORNEIOS
@@ -5467,49 +5714,18 @@ async def limparchat(interaction, quantidade: app_commands.Range[int, 1, 1000]):
 # 32. COMANDO DE AJUDA
 # ============================================================
 
-@bot.tree.command(
-    name="dischess",
-    description="Veja os comandos do DisChessLord."
-)
-async def dischess(interaction):
-    embed = discord.Embed(
-        title="♟️ DisChessLord",
-        description="Sistema de xadrez para Discord.",
-        color=discord.Color.blurple()
-    )
-
-    embed.add_field(
-        name="Comandos de jogador",
-        value=(
-            "`/desafiar`\n"
-            "`/nick`\n"
-            "`/perfil`\n"
-            "`/ranking`\n"
-            "`/historico`\n"
-            "`/analisar`\n"
-            "`/eventos`\n"
-            "`/torneios`\n"
-            "`/inscrever_torneio`"
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="Comandos administrativos",
-        value=(
-            "`/dev_dashboard`\n"
-            "`/dev_posicionar_peca`\n"
-            "`/resetar`\n"
-            "`/limparchat`"
-        ),
-        inline=False
-    )
-
-    await interaction.response.send_message(
-        embed=embed,
-        ephemeral=True
-    )
-
+@bot.tree.command(name="help", description="Veja todos os comandos do DisChessLord.")
+async def help_command(interaction):
+    embed = discord.Embed(title="♟️ DisChessLord — Ajuda",
+                          description="Comandos disponíveis organizados por categoria.",
+                          color=discord.Color.blurple())
+    embed.add_field(name="♟️ Comandos normais",
+        value="\`/desafiar\` — desafiar jogador\n\`/nick\` — definir nick\n\`/perfil\` — consultar perfil\n\`/ranking\` — ranking de ELO\n\`/historico\` — histórico de partidas\n\`/analisar\` — ver PGN\n\`/saldo\` — saldo de ChessCoins\n\`/eventos\` — eventos ativos\n\`/torneios\` — torneios ativos\n\`/inscrever_torneio\` — inscrever-se\n\`/sorteios\` — sorteios abertos\n\`/participar_sorteio\` — entrar usando tickets", inline=False)
+    embed.add_field(name="🛡️ Comandos administrativos",
+        value="\`/adm_dashboard\` — painel de moderação\n\`/limparchat\` — limpar mensagens (dono do servidor)", inline=False)
+    embed.add_field(name="⚙️ Comandos de desenvolvedor",
+        value="\`/dev_dashboard\` — painel completo\n\`/resetar\` — resetar perfis\n\`/dev_posicionar_peca\` — administrar peças", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ============================================================
 # 33. INICIALIZAÇÃO
