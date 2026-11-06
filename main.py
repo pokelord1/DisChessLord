@@ -2958,10 +2958,23 @@ class ConfirmDesistenciaView(discord.ui.View):
 # ============================================================
 
 async def sincronizar_interfaces_partida(game, embed=None, final=False):
-    """Atualiza os dois tabuleiros privados e as cópias públicas sem controles."""
+    """Sincroniza DMs (partidas entre servidores) ou o tabuleiro jogável no Fórum."""
     embed = embed or criar_embed_partida(game)
     if final:
         game["final_embed"] = embed
+
+    if game.get("play_in_forum"):
+        view = RevancheView(game) if final else ChessBoardView(game)
+        for message in list(game.get("public_messages", [])):
+            try:
+                await message.edit(
+                    content=None, embed=embed, view=view,
+                    attachments=[criar_arquivo_tabuleiro(game)]
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                logging.exception("Falha ao atualizar o tabuleiro jogável no Fórum.")
+        return
+
     for user_id, message in list(game.get("dm_messages", {}).items()):
         try:
             view = RevancheView(game) if final else ChessBoardView(game)
@@ -3439,65 +3452,83 @@ async def iniciar_sala(interaction, sala_id):
                 game["public_messages"].append(sala_message)
 
             dm_embed = criar_embed_partida(game)
-            dm_enviadas = {}
-            try:
-                for uid in (brancas, pretas):
-                    usuario = bot.get_user(int(uid))
-                    if usuario is None:
-                        usuario = await bot.fetch_user(int(uid))
-                    dm_enviadas[int(uid)] = await usuario.send(
-                        content=(
-                            f"♟️ **{sala['name']}** — sua partida começou!\n"
-                            "Use os botões desta mensagem para jogar."
-                        ),
-                        embed=dm_embed,
-                        view=ChessBoardView(game),
-                        file=criar_arquivo_tabuleiro(game)
-                    )
-            except (discord.Forbidden, discord.HTTPException):
-                for enviada in dm_enviadas.values():
-                    try:
-                        await enviada.delete()
-                    except discord.HTTPException:
-                        pass
-                active_games.pop(partida_thread.id, None)
+            if mesma_guild:
+                # Partida no mesmo servidor: ambos jogam na thread do Fórum.
+                game["play_in_forum"] = True
+                game["dm_messages"] = {}
                 await message.edit(
                     content=(
-                        "⚠️ Não foi possível enviar a partida por DM. "
-                        "Os dois jogadores precisam permitir mensagens diretas do bot."
+                        f"♟️ **{sala['name']}** — partida iniciada!\n"
+                        f"⚪ Brancas (começa): <@{brancas}>\n"
+                        f"⚫ Pretas: <@{pretas}>\n"
+                        "Use os botões abaixo para jogar diretamente neste Fórum."
                     ),
                     embed=dm_embed,
-                    view=None,
+                    view=ChessBoardView(game),
                     attachments=[criar_arquivo_tabuleiro(game)]
                 )
-                await interaction.response.send_message(
-                    "Não consegui enviar o tabuleiro por DM. Verifiquem se ambos permitem mensagens diretas do servidor e tentem novamente.",
-                    ephemeral=True
-                )
-                return
+            else:
+                # Partida entre servidores: cada jogador joga pela própria DM.
+                game["play_in_forum"] = False
+                dm_enviadas = {}
+                try:
+                    for uid in (brancas, pretas):
+                        usuario = bot.get_user(int(uid))
+                        if usuario is None:
+                            usuario = await bot.fetch_user(int(uid))
+                        dm_enviadas[int(uid)] = await usuario.send(
+                            content=(
+                                f"♟️ **{sala['name']}** — sua partida começou!\n"
+                                "Use os botões desta mensagem para jogar."
+                            ),
+                            embed=dm_embed,
+                            view=ChessBoardView(game),
+                            file=criar_arquivo_tabuleiro(game)
+                        )
+                except (discord.Forbidden, discord.HTTPException):
+                    for enviada in dm_enviadas.values():
+                        try:
+                            await enviada.delete()
+                        except discord.HTTPException:
+                            pass
+                    active_games.pop(partida_thread.id, None)
+                    await message.edit(
+                        content=(
+                            "⚠️ Não foi possível enviar a partida por DM. "
+                            "Os dois jogadores precisam permitir mensagens diretas do bot."
+                        ),
+                        embed=dm_embed,
+                        view=None,
+                        attachments=[criar_arquivo_tabuleiro(game)]
+                    )
+                    await interaction.response.send_message(
+                        "Não consegui enviar o tabuleiro por DM. Verifiquem se ambos permitem mensagens diretas do servidor e tentem novamente.",
+                        ephemeral=True
+                    )
+                    return
 
-            game["dm_messages"] = dm_enviadas
-            aviso_publico = (
-                "🔒 **Partida entre servidores**\n"
-                "Este tabuleiro é apenas para acompanhamento. "
-                "Para jogar, abra a DM enviada pelo DisChessLord e use os botões por lá."
-            )
-            for public_message in game["public_messages"]:
-                await public_message.edit(
-                    content=aviso_publico,
-                    embed=dm_embed,
-                    view=None,
-                    attachments=[criar_arquivo_tabuleiro(game)]
+                game["dm_messages"] = dm_enviadas
+                aviso_publico = (
+                    "🔒 **Partida entre servidores**\n"
+                    "Este tabuleiro é apenas para acompanhamento. "
+                    "Para jogar, abra a DM enviada pelo DisChessLord e use os botões por lá."
                 )
-
-HTTPException):
-                    logging.exception("Falha ao atualizar a publicação original da sala.")
+                for public_message in game["public_messages"]:
+                    await public_message.edit(
+                        content=aviso_publico,
+                        embed=dm_embed,
+                        view=None,
+                        attachments=[criar_arquivo_tabuleiro(game)]
+                    )
 
             await interaction.response.send_message(
                 f"Você entrou em **{sala['name']}**!\n"
                 f"🎲 Sorteio: <@{brancas}> começa com as brancas.\n"
-                "Enviei os tabuleiros interativos por DM para os dois jogadores. "
-                "No servidor, o tabuleiro fica apenas para acompanhamento.",
+                + (
+                    "Os dois podem jogar diretamente pelos botões nesta publicação do Fórum."
+                    if mesma_guild
+                    else "Enviei os tabuleiros interativos por DM para os dois jogadores. No servidor, o tabuleiro fica apenas para acompanhamento."
+                ),
                 ephemeral=True
             )
         except (discord.Forbidden, discord.HTTPException, IndexError, TypeError):
