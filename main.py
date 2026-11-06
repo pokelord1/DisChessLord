@@ -491,13 +491,21 @@ async def conquistas(interaction):
         await interaction.response.send_message("Não consegui salvar suas conquistas. Tente novamente.", ephemeral=True)
         return
     desbloqueadas = set(dados.get("achievements", []))
-    embed = discord.Embed(title="🏅 Suas conquistas", color=discord.Color.gold())
-    for chave, info in ACHIEVEMENTS.items():
-        estado = "✅ Desbloqueada" if chave in desbloqueadas else "🔒 Bloqueada"
-        embed.add_field(name=f"{info['name']} — {estado}", value=f"{info['description']}\nRecompensa: **{info['reward']} ChessCoins**", inline=False)
+    embeds = [
+        discord.Embed(title="🏅 Suas conquistas (1/2)", color=discord.Color.gold()),
+        discord.Embed(title="🏅 Suas conquistas (2/2)", color=discord.Color.gold())
+    ]
     if novas:
-        embed.description = "Novas conquistas resgatadas: " + ", ".join(f"{nome} (+{valor})" for nome, valor in novas)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+        embeds[0].description = "Novas conquistas resgatadas: " + ", ".join(f"{nome} (+{valor})" for nome, valor in novas)
+    for indice, (chave, info) in enumerate(ACHIEVEMENTS.items()):
+        estado = "✅ Desbloqueada" if chave in desbloqueadas else "🔒 Bloqueada"
+        destino = embeds[indice // 25]
+        destino.add_field(
+            name=f"{info['name']} — {estado}",
+            value=f"{info['description']}\nRecompensa: **{info['reward']} ChessCoins**",
+            inline=False
+        )
+    await interaction.response.send_message(embeds=embeds, ephemeral=True)
 
 @bot.tree.command(name="saldo", description="Veja seu saldo de ChessCoins.")
 async def cmd_saldo(interaction: discord.Interaction):
@@ -3524,7 +3532,7 @@ class AdmDashboardView(discord.ui.View):
         return True
 
     @discord.ui.button(label="Aplicar timeout", emoji="🔇", style=discord.ButtonStyle.danger)
-    async def timeout(self, interaction, button):
+    async def aplicar_timeout(self, interaction, button):
         await interaction.response.send_modal(TimeoutModal(self.owner_id, self.guild_id))
 
     @discord.ui.button(label="Retirar timeout", emoji="🔊", style=discord.ButtonStyle.success)
