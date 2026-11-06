@@ -241,6 +241,9 @@ def dados_padrao():
     return {
         "chesscoins": 0,
         "command_tickets": 0,
+        "daily_last_claim": None,
+        "achievements": [],
+        "current_win_streak": 0,
         "ranking_ativo": False,
         "elo": 100,
         "peak_elo": 100,
@@ -371,6 +374,81 @@ def alterar_chesscoins(user_id: int, quantia: int) -> bool:
         return False
     return True
 
+ACHIEVEMENTS = {
+    "primeira_partida": {"name": "Primeiros movimentos", "description": "Jogue sua primeira partida.", "reward": 100},
+    "sequencia_5": {"name": "Em chamas", "description": "Vença 5 partidas seguidas.", "reward": 250},
+    "patente_amador": {"name": "Subindo de nível", "description": "Alcance a patente Amador.", "reward": 150},
+    "patente_intermediario": {"name": "Já entende do jogo", "description": "Alcance a patente Intermediário.", "reward": 300},
+}
+
+def verificar_conquistas(user_id):
+    dados = obter_dados_usuario(user_id)
+    partidas = len(dados.get("history", []))
+    patente = patente_do_perfil(dados)
+    condicoes = {
+        "primeira_partida": partidas >= 1,
+        "sequencia_5": int(dados.get("current_win_streak", 0)) >= 5,
+        "patente_amador": patente in PATENTES_NOMES[PATENTES_NOMES.index("Amador"):],
+        "patente_intermediario": patente in PATENTES_NOMES[PATENTES_NOMES.index("Intermediário"):],
+    }
+    desbloqueadas = dados.setdefault("achievements", [])
+    novas = []
+    for chave, concluiu in condicoes.items():
+        if concluiu and chave not in desbloqueadas:
+            desbloqueadas.append(chave)
+            recompensa = ACHIEVEMENTS[chave]["reward"]
+            dados["chesscoins"] = obter_chesscoins(user_id) + recompensa
+            novas.append((ACHIEVEMENTS[chave]["name"], recompensa))
+    return novas
+
+
+
+
+@bot.tree.command(name="daily", description="Resgate 50 ChessCoins diariamente.")
+async def daily(interaction):
+    dados = obter_dados_usuario(interaction.user.id)
+    hoje = datetime.now(timezone.utc).date().isoformat()
+    if dados.get("daily_last_claim") == hoje:
+        await interaction.response.send_message("Você já resgatou seu daily hoje. Volte depois da virada do dia UTC.", ephemeral=True)
+        return
+    anterior = int(dados.get("chesscoins", 0))
+    data_anterior = dados.get("daily_last_claim")
+    dados["chesscoins"] = anterior + 50
+    dados["daily_last_claim"] = hoje
+    if not salvar_dados():
+        dados["chesscoins"] = anterior
+        dados["daily_last_claim"] = data_anterior
+        await interaction.response.send_message("Não consegui salvar seu daily. Tente novamente.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"🪙 Você recebeu **50 ChessCoins**! Saldo: **{anterior + 50}**.", ephemeral=True)
+
+
+@bot.tree.command(name="loja", description="Veja a loja de itens do DisChessLord.")
+async def loja(interaction):
+    embed = discord.Embed(
+        title="🛒 Loja DisChessLord",
+        description="A loja ainda está sendo preparada. Em breve você poderá trocar ChessCoins por itens e personalizações.\n\nSeus tickets administrativos poderão oferecer benefícios e descontos especiais.",
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="Seu saldo", value=f"🪙 {obter_chesscoins(interaction.user.id)} ChessCoins", inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="conquistas", description="Veja suas conquistas e recompensas.")
+async def conquistas(interaction):
+    dados = obter_dados_usuario(interaction.user.id)
+    novas = verificar_conquistas(interaction.user.id)
+    if novas and not salvar_dados():
+        await interaction.response.send_message("Não consegui salvar suas conquistas. Tente novamente.", ephemeral=True)
+        return
+    desbloqueadas = set(dados.get("achievements", []))
+    embed = discord.Embed(title="🏅 Suas conquistas", color=discord.Color.gold())
+    for chave, info in ACHIEVEMENTS.items():
+        estado = "✅ Desbloqueada" if chave in desbloqueadas else "🔒 Bloqueada"
+        embed.add_field(name=f"{info['name']} — {estado}", value=f"{info['description']}\nRecompensa: **{info['reward']} ChessCoins**", inline=False)
+    if novas:
+        embed.description = "Novas conquistas resgatadas: " + ", ".join(f"{nome} (+{valor})" for nome, valor in novas)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="saldo", description="Veja seu saldo de ChessCoins.")
 async def cmd_saldo(interaction: discord.Interaction):
@@ -1160,6 +1238,8 @@ def finalizar_partida(game, resultado, motivo):
 
     if resultado == "1-0":
         score = 1.0
+        dados_brancas["current_win_streak"] = int(dados_brancas.get("current_win_streak", 0)) + 1
+        dados_pretas["current_win_streak"] = 0
         dados_brancas["wins"] += 1
         dados_pretas["losses"] += 1
         dados_brancas["ranking_ativo"] = True
@@ -1168,6 +1248,8 @@ def finalizar_partida(game, resultado, motivo):
 
     elif resultado == "0-1":
         score = 0.0
+        dados_pretas["current_win_streak"] = int(dados_pretas.get("current_win_streak", 0)) + 1
+        dados_brancas["current_win_streak"] = 0
         dados_brancas["losses"] += 1
         dados_pretas["wins"] += 1
         dados_brancas["ranking_ativo"] = True
@@ -1176,6 +1258,8 @@ def finalizar_partida(game, resultado, motivo):
 
     else:
         score = 0.5
+        dados_brancas["current_win_streak"] = 0
+        dados_pretas["current_win_streak"] = 0
         dados_brancas["draws"] += 1
         dados_pretas["draws"] += 1
         dados_brancas["ranking_ativo"] = True
@@ -1199,6 +1283,9 @@ def finalizar_partida(game, resultado, motivo):
         delta_brancas,
         delta_pretas
     )
+
+    for user_id in (white, black):
+        verificar_conquistas(user_id)
 
     salvou = salvar_dados()
 
