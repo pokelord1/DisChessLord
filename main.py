@@ -1745,6 +1745,8 @@ def criar_partida(
         "selected_square": None,
         "finished": False,
         "message": None,
+        "dm_messages": {},
+        "public_messages": [],
         "event_snapshot": snapshot,
         "custom_rules": None
     }
@@ -2288,6 +2290,8 @@ class ChessBoardView(discord.ui.View):
                 embed=criar_embed_partida(self.game),
                 view=self
             )
+            await sincronizar_interfaces_partida(self.game)
+            await sincronizar_interfaces_partida(self.game)
 
     def criar_callback_movimento(self, move):
 
@@ -2370,6 +2374,7 @@ class ChessBoardView(discord.ui.View):
                 embed=criar_embed_partida(self.game),
                 view=self
             )
+            await sincronizar_interfaces_partida(self.game)
 
     async def proxima_pagina(self, interaction):
         async with obter_lock(
@@ -2387,6 +2392,7 @@ class ChessBoardView(discord.ui.View):
                 embed=criar_embed_partida(self.game),
                 view=self
             )
+            await sincronizar_interfaces_partida(self.game)
 
     async def cancelar_selecao(self, interaction):
         async with obter_lock(
@@ -2405,6 +2411,7 @@ class ChessBoardView(discord.ui.View):
                 embed=criar_embed_partida(self.game),
                 view=self
             )
+            await sincronizar_interfaces_partida(self.game)
 
     async def callback_oferecer_empate(self, interaction):
         async with obter_lock(
@@ -2429,6 +2436,7 @@ class ChessBoardView(discord.ui.View):
                 embed=criar_embed_partida(self.game),
                 view=self
             )
+            await sincronizar_interfaces_partida(self.game)
 
     async def callback_aceitar_empate(self, interaction):
         async with obter_lock(
@@ -2481,6 +2489,7 @@ class ChessBoardView(discord.ui.View):
                 embed=embed,
                 view=None
             )
+            await sincronizar_interfaces_partida(self.game, embed=embed, final=True)
 
     async def callback_recusar_empate(self, interaction):
         async with obter_lock(
@@ -2514,6 +2523,7 @@ class ChessBoardView(discord.ui.View):
                 embed=criar_embed_partida(self.game),
                 view=self
             )
+            await sincronizar_interfaces_partida(self.game)
 
     async def callback_desistir_clique(self, interaction):
         async with obter_lock(
@@ -2824,17 +2834,9 @@ class ConfirmDesistenciaView(discord.ui.View):
                 view=self
             )
 
-            if self.game.get("message"):
-                try:
-                    await self.game["message"].edit(
-                        content=None,
-                        embed=embed,
-                        view=RevancheView(self.game)
-                    )
-                except discord.HTTPException:
-                    logging.exception(
-                        "Erro ao atualizar partida."
-                    )
+            await sincronizar_interfaces_partida(
+                self.game, embed=embed, final=True
+            )
 
     @discord.ui.button(
         label="Cancelar",
@@ -2857,6 +2859,28 @@ class ConfirmDesistenciaView(discord.ui.View):
 # ============================================================
 # 15. ATUALIZAÇÃO DO TABULEIRO
 # ============================================================
+
+async def sincronizar_interfaces_partida(game, embed=None, final=False):
+    """Atualiza os dois tabuleiros privados e as cópias públicas sem controles."""
+    embed = embed or criar_embed_partida(game)
+    for user_id, message in list(game.get("dm_messages", {}).items()):
+        try:
+            view = RevancheView(game) if final else ChessBoardView(game)
+            await message.edit(content=None, embed=embed, view=view)
+        except (discord.Forbidden, discord.HTTPException):
+            logging.exception("Falha ao atualizar a DM do jogador %s.", user_id)
+
+    aviso = (
+        "🔒 **Partida entre servidores**\n"
+        "Este tabuleiro é apenas para acompanhamento. "
+        "Para jogar, abra a DM enviada pelo DisChessLord e use os botões por lá."
+    )
+    for message in list(game.get("public_messages", [])):
+        try:
+            await message.edit(content=aviso, embed=embed, view=None)
+        except (discord.Forbidden, discord.HTTPException):
+            logging.exception("Falha ao atualizar o tabuleiro público da partida.")
+
 
 async def atualizar_tabuleiro(
     interaction,
@@ -2896,7 +2920,7 @@ async def atualizar_tabuleiro(
             embed=embed,
             view=RevancheView(game)
         )
-
+        await sincronizar_interfaces_partida(game, embed=embed, final=True)
         return
 
     view.rebuild()
@@ -2905,9 +2929,7 @@ async def atualizar_tabuleiro(
         embed=criar_embed_partida(game),
         view=view
     )
-
-    # O mesmo tabuleiro é editado a cada lance; o controle passa automaticamente
-    # para o jogador indicado por board.turn, sem criar uma cópia em outro servidor.
+    await sincronizar_interfaces_partida(game)
 
 
 # ============================================================
@@ -3292,46 +3314,68 @@ async def iniciar_sala(interaction, sala_id):
             active_games[partida_thread.id] = game
             SALAS_JOGO.pop(sala_id, None)
 
-            # Um único tabuleiro é criado no Fórum do jogador sorteado para
-            # começar (as brancas). A publicação original da sala não vira cópia.
-            view = ChessBoardView(game)
+            # Cada jogador recebe uma cópia interativa pela DM. O Fórum e a
+            # publicação original mostram apenas o tabuleiro, sem controles.
             game["message"] = message
-            await message.edit(
-                content=(
-                    f"♟️ **{sala['name']}** — partida iniciada!\n"
-                    f"⚪ Brancas: <@{brancas}> (começa)\n"
-                    f"⚫ Pretas: <@{pretas}>"
-                ),
-                embed=criar_embed_partida(game),
-                view=view
-            )
-
+            game["public_messages"] = [message]
             sala_message = sala.get("message")
             if sala_message is not None:
-                try:
-                    await sala_message.edit(
+                game["public_messages"].append(sala_message)
+
+            dm_embed = criar_embed_partida(game)
+            dm_enviadas = {}
+            try:
+                for uid in (brancas, pretas):
+                    usuario = bot.get_user(int(uid))
+                    if usuario is None:
+                        usuario = await bot.fetch_user(int(uid))
+                    dm_enviadas[int(uid)] = await usuario.send(
                         content=(
-                            f"♟️ **{sala['name']}** — partida iniciada no servidor "
-                            f"de quem começa: {partida_thread.mention}"
+                            f"♟️ **{sala['name']}** — sua partida começou!\n"
+                            "Use os botões desta mensagem para jogar."
                         ),
-                        embed=discord.Embed(
-                            title="♟️ Partida iniciada",
-                            description=(
-                                f"O tabuleiro único está no servidor de "
-                                f"<@{brancas}>, que começa com as brancas.\n"
-                                f"Local: {partida_thread.mention}"
-                            ),
-                            color=discord.Color.blurple()
-                        ),
-                        view=None
+                        embed=dm_embed,
+                        view=ChessBoardView(game)
                     )
-                except discord.HTTPException:
-                    logging.exception("Não foi possível atualizar a publicação original da sala.")
+            except (discord.Forbidden, discord.HTTPException):
+                for enviada in dm_enviadas.values():
+                    try:
+                        await enviada.delete()
+                    except discord.HTTPException:
+                        pass
+                active_games.pop(partida_thread.id, None)
+                await message.edit(
+                    content=(
+                        "⚠️ Não foi possível enviar a partida por DM. "
+                        "Os dois jogadores precisam permitir mensagens diretas do bot."
+                    ),
+                    embed=dm_embed,
+                    view=None
+                )
+                await interaction.response.send_message(
+                    "Não consegui enviar o tabuleiro por DM. Verifiquem se ambos permitem mensagens diretas do servidor e tentem novamente.",
+                    ephemeral=True
+                )
+                return
+
+            game["dm_messages"] = dm_enviadas
+            aviso_publico = (
+                "🔒 **Partida entre servidores**\n"
+                "Este tabuleiro é apenas para acompanhamento. "
+                "Para jogar, abra a DM enviada pelo DisChessLord e use os botões por lá."
+            )
+            for public_message in game["public_messages"]:
+                await public_message.edit(
+                    content=aviso_publico,
+                    embed=dm_embed,
+                    view=None
+                )
 
             await interaction.response.send_message(
                 f"Você entrou em **{sala['name']}**!\n"
                 f"🎲 Sorteio: <@{brancas}> começa com as brancas.\n"
-                f"O tabuleiro principal foi enviado ao servidor de quem começa: {partida_thread.mention}",
+                "Enviei os tabuleiros interativos por DM para os dois jogadores. "
+                "No servidor, o tabuleiro fica apenas para acompanhamento.",
                 ephemeral=True
             )
         except (discord.Forbidden, discord.HTTPException, IndexError, TypeError):
