@@ -637,6 +637,94 @@ def verificar_conquistas(user_id):
 
 
 
+class DenunciarModal(discord.ui.Modal, title="Denunciar jogador"):
+    jogador = discord.ui.TextInput(
+        label="Nick global do jogador denunciado",
+        placeholder="Nick definido pelo jogador em /nick",
+        max_length=32
+    )
+    motivo = discord.ui.TextInput(
+        label="Motivo da denúncia",
+        placeholder="Explique o que aconteceu, com detalhes objetivos.",
+        style=discord.TextStyle.paragraph,
+        min_length=10,
+        max_length=1000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        alvo, erro = await buscar_jogador_global(self.jogador.value)
+        if erro:
+            await interaction.response.send_message(erro, ephemeral=True)
+            return
+        if alvo["id"] == interaction.user.id:
+            await interaction.response.send_message("Você não pode denunciar a si mesmo.", ephemeral=True)
+            return
+
+        agora = agora_utc()
+        denuncias = admin_data.setdefault("reports", [])
+        limite = agora - timedelta(minutes=5)
+        for item in reversed(denuncias):
+            if str(item.get("reporter_id")) != str(interaction.user.id):
+                continue
+            try:
+                criada = datetime.fromisoformat(item.get("created_at", ""))
+            except (TypeError, ValueError):
+                continue
+            if criada >= limite:
+                await interaction.response.send_message(
+                    "Você já enviou uma denúncia recentemente. Aguarde 5 minutos antes de enviar outra.",
+                    ephemeral=True
+                )
+                return
+
+        denuncia = {
+            "id": gerar_id(),
+            "reporter_id": str(interaction.user.id),
+            "reporter_nick": nome_jogador(interaction.user.id),
+            "target_id": str(alvo["id"]),
+            "target_nick": alvo["nick"],
+            "reason": str(self.motivo.value).strip(),
+            "guild_id": str(interaction.guild_id) if interaction.guild_id else None,
+            "channel_id": str(interaction.channel_id) if interaction.channel_id else None,
+            "created_at": agora.isoformat(),
+            "status": "pendente"
+        }
+        denuncias.append(denuncia)
+        if not salvar_admin():
+            denuncias.pop()
+            await interaction.response.send_message(
+                "Não consegui registrar a denúncia. Tente novamente mais tarde.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            "✅ Denúncia registrada. A equipe responsável poderá analisá-la. Obrigado por ajudar a manter a comunidade segura.",
+            ephemeral=True
+        )
+
+        embed = discord.Embed(
+            title="🚨 Nova denúncia",
+            description=f"**Denunciante:** {denuncia['reporter_nick']}\n"
+                        f"**Denunciado:** {denuncia['target_nick']}\n"
+                        f"**Motivo:** {denuncia['reason']}\n"
+                        f"**Servidor:** {interaction.guild.name if interaction.guild else 'Fora de servidor'}\n"
+                        f"**Data:** <t:{int(agora.timestamp())}:F>",
+            color=discord.Color.orange()
+        )
+        for dev_id in USUARIOS_AUTORIZADOS_DEV:
+            try:
+                dev = bot.get_user(dev_id) or await bot.fetch_user(dev_id)
+                await dev.send(embed=embed)
+            except (discord.Forbidden, discord.HTTPException):
+                logging.warning("Não foi possível enviar denúncia por DM para o desenvolvedor %s.", dev_id)
+
+
+@bot.tree.command(name="denunciar", description="Envie uma denúncia privada sobre outro jogador.")
+async def denunciar(interaction: discord.Interaction):
+    await interaction.response.send_modal(DenunciarModal())
+
+
 @bot.tree.command(name="daily", description="Resgate 50 ChessCoins diariamente.")
 async def daily(interaction):
     dados = obter_dados_usuario(interaction.user.id)
@@ -828,7 +916,8 @@ def dados_admin_padrao():
         "pieces": {},
         "settings": {"role_prices": {}},
         "raffles": {},
-        "missions": {}
+        "missions": {},
+        "reports": []
     }
 
 
@@ -866,6 +955,9 @@ def carregar_admin():
                 raise ValueError(
                     f"Seção administrativa inválida: {chave}"
                 )
+
+        if not isinstance(padrao.get("reports"), list):
+            padrao["reports"] = []
 
         admin_data = padrao
 
