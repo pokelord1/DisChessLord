@@ -3208,6 +3208,16 @@ def sala_aberta(sala):
     return sala.get("status") == "aguardando"
 
 
+def sala_pendente_do_jogador(user_id):
+    return next(
+        (
+            sala for sala in SALAS_JOGO.values()
+            if sala_aberta(sala) and int(sala.get("owner", 0)) == int(user_id)
+        ),
+        None
+    )
+
+
 def embed_sala(sala):
     embed = discord.Embed(title=f"♟️ {sala['name']}", description="Mesa aguardando um segundo jogador.", color=discord.Color.blurple())
     embed.add_field(name="Criador", value=f"<@{sala['owner']}>", inline=True)
@@ -3234,6 +3244,12 @@ async def iniciar_sala(interaction, sala_id):
             return
         if jogador_ocupado(jogador) or jogador_ocupado(sala["owner"]):
             await interaction.response.send_message("Um dos jogadores já está em uma partida ou desafio.", ephemeral=True)
+            return
+        if sala_pendente_do_jogador(jogador):
+            await interaction.response.send_message(
+                "Você já criou uma partida que ainda aguarda jogador. Cancele essa partida antes de entrar em outra.",
+                ephemeral=True
+            )
             return
         forum = await obter_forum_jogos(interaction)
         if forum is None:
@@ -3363,6 +3379,15 @@ class CriarSalaModal(discord.ui.Modal, title="Criar mesa de xadrez"):
     async def on_submit(self, interaction):
         if not await exigir_nick(interaction):
             return
+        if jogador_ocupado(interaction.user.id):
+            await interaction.response.send_message("Você já está em uma partida ou desafio.", ephemeral=True)
+            return
+        if sala_pendente_do_jogador(interaction.user.id):
+            await interaction.response.send_message(
+                "Você já criou uma partida que ainda aguarda jogador. Cancele-a antes de criar outra.",
+                ephemeral=True
+            )
+            return
         nome = str(self.nome.value).strip()
         vis = str(self.visibilidade.value).strip().lower()
         senha = str(self.senha.value).strip()
@@ -3407,6 +3432,56 @@ class CriarSalaModal(discord.ui.Modal, title="Criar mesa de xadrez"):
             await interaction.response.send_message("Não consegui criar a mesa. Tente novamente.", ephemeral=True)
 
 
+class CancelarSalaModal(discord.ui.Modal, title="Cancelar partida criada"):
+    nome = discord.ui.TextInput(
+        label="Nome exato da partida",
+        placeholder="Digite o nome da sua partida",
+        max_length=80
+    )
+    confirmacao = discord.ui.TextInput(
+        label='Digite "EXCLUIR" para confirmar',
+        placeholder="EXCLUIR",
+        max_length=10
+    )
+
+    async def on_submit(self, interaction):
+        if not await exigir_nick(interaction):
+            return
+        nome = str(self.nome.value).strip()
+        confirmacao = str(self.confirmacao.value).strip().casefold()
+        if confirmacao != "excluir":
+            await interaction.response.send_message('Cancelamento não confirmado. Digite exatamente "EXCLUIR".', ephemeral=True)
+            return
+
+        sala = next(
+            (
+                x for x in SALAS_JOGO.values()
+                if sala_aberta(x)
+                and int(x.get("owner", 0)) == interaction.user.id
+                and x.get("name", "").casefold() == nome.casefold()
+            ),
+            None
+        )
+        if sala is None:
+            await interaction.response.send_message(
+                "Não encontrei uma partida aguardando com esse nome criada por você.",
+                ephemeral=True
+            )
+            return
+
+        try:
+            thread = sala.get("thread")
+            if thread is not None:
+                await thread.delete(reason=f"Partida cancelada por {interaction.user}")
+            SALAS_JOGO.pop(sala["id"], None)
+            await interaction.response.send_message(f'Partida **{sala["name"]}** cancelada e removida.', ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("Não tenho permissão para remover a publicação dessa partida.", ephemeral=True)
+        except discord.HTTPException:
+            logging.exception("Falha ao cancelar partida.")
+            await interaction.response.send_message("Não consegui cancelar a partida. Tente novamente.", ephemeral=True)
+
+
 class RevancheView(discord.ui.View):
     def __init__(self, game):
         super().__init__(timeout=86400)
@@ -3448,7 +3523,8 @@ class RevancheView(discord.ui.View):
 @app_commands.choices(acao=[
     app_commands.Choice(name="Partidas disponíveis", value="partidas"),
     app_commands.Choice(name="Criar uma partida", value="criar"),
-    app_commands.Choice(name="Entrar em partida privada", value="entrar")
+    app_commands.Choice(name="Entrar em partida privada", value="entrar"),
+    app_commands.Choice(name="Cancelar uma partida criada", value="cancelar")
 ])
 @app_commands.describe(acao="Deixe vazio para entrar em uma partida pública aleatória.", nome="Nome exato da mesa privada.", senha="Senha da mesa privada.")
 async def jogar(interaction, acao: str = None, nome: str = None, senha: str = None):
@@ -3457,8 +3533,23 @@ async def jogar(interaction, acao: str = None, nome: str = None, senha: str = No
     if jogador_ocupado(interaction.user.id):
         await interaction.response.send_message("Você já está em uma partida ou desafio.", ephemeral=True)
         return
+    if acao == "cancelar":
+        await interaction.response.send_modal(CancelarSalaModal())
+        return
     if acao == "criar":
+        if sala_pendente_do_jogador(interaction.user.id):
+            await interaction.response.send_message(
+                "Você já criou uma partida que ainda aguarda jogador. Cancele-a antes de criar outra.",
+                ephemeral=True
+            )
+            return
         await interaction.response.send_modal(CriarSalaModal())
+        return
+    if sala_pendente_do_jogador(interaction.user.id):
+        await interaction.response.send_message(
+            "Você já criou uma partida que ainda aguarda jogador. Cancele-a antes de entrar em outra.",
+            ephemeral=True
+        )
         return
     forum = await obter_forum_jogos(interaction)
     if forum is None:
