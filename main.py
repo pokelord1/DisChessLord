@@ -4636,11 +4636,6 @@ class TorneioIdModal(discord.ui.Modal):
             return
         torneio = encontrados[0]
         tournament_id = torneio["id"]
-            await interaction.response.send_message(
-                "Torneio não encontrado.",
-                ephemeral=True
-            )
-            return
 
         if str(torneio["guild_id"]) != str(self.guild_id):
             await interaction.response.send_message(
@@ -4707,7 +4702,7 @@ class TorneioIdModal(discord.ui.Modal):
             return
 
         await interaction.response.send_message(
-            f"Torneio `{tournament_id}` atualizado.",
+            f"Torneio **{torneio['name']}** atualizado.",
             ephemeral=True
         )
 
