@@ -3281,19 +3281,33 @@ async def iniciar_sala(interaction, sala_id):
                 ephemeral=True
             )
             return
-        forum = await obter_forum_jogos(interaction)
-        if forum is None:
+        forum_atual = await obter_forum_jogos(interaction)
+        if forum_atual is None:
             return
 
-        # A publicação da sala serve para anunciar a vaga. Ao entrar o segundo
-        # jogador, cria uma discussão própria para a partida em andamento.
+        # Sorteia quem começa. Como as brancas fazem o primeiro lance,
+        # o jogador sorteado recebe as brancas e o tabuleiro principal.
+        brancas, pretas = secrets.SystemRandom().sample(
+            [sala["owner"], jogador], 2
+        )
+
+        # O tabuleiro principal é publicado no servidor de quem começa.
+        # Se for o criador, reutiliza o Fórum da publicação original;
+        # se for quem aceitou, usa o Fórum do servidor atual.
+        forum_partida = forum_atual
+        if brancas == sala["owner"]:
+            thread_original = sala.get("thread")
+            forum_original = getattr(thread_original, "parent", None)
+            if isinstance(forum_original, discord.ForumChannel):
+                forum_partida = forum_original
+
         try:
-            created = await forum.create_thread(
+            created = await forum_partida.create_thread(
                 name=sala["name"][:100],
                 content=(
                     f"♟️ **{sala['name']}** — partida iniciada!\n"
-                    f"Brancas: <@{sala['owner']}>\n"
-                    f"Pretas: <@{jogador}>"
+                    f"⚪ Brancas (começa): <@{brancas}>\n"
+                    f"⚫ Pretas: <@{pretas}>"
                 )
             )
             partida_thread = getattr(created, "thread", None)
@@ -3303,7 +3317,8 @@ async def iniciar_sala(interaction, sala_id):
             if message is None:
                 message = created[1]
 
-            game = criar_partida(sala["owner"], jogador, partida_thread.id, interaction.guild_id)
+            game = criar_partida(brancas, pretas, partida_thread.id, forum_partida.guild.id)
+            game["starter"] = brancas
             game["elo_enabled"] = bool(sala["elo"])
             game["room_name"] = sala["name"]
             active_games[partida_thread.id] = game
@@ -3330,7 +3345,9 @@ async def iniciar_sala(interaction, sala_id):
                 )
 
             await interaction.response.send_message(
-                f"Você entrou em **{sala['name']}**! A partida começou em {partida_thread.mention}.",
+                f"Você entrou em **{sala['name']}**!\n"
+                f"🎲 Sorteio: <@{brancas}> começa com as brancas.\n"
+                f"O tabuleiro principal foi enviado ao servidor de quem começa: {partida_thread.mention}",
                 ephemeral=True
             )
         except (discord.Forbidden, discord.HTTPException, IndexError, TypeError):
