@@ -8,6 +8,7 @@ import logging
 import shutil
 import copy
 import math
+import secrets
 from datetime import datetime, timezone, timedelta
 
 import discord
@@ -3322,13 +3323,36 @@ class DevRafflesView(discord.ui.View):
             await interaction.response.send_message("Não há sorteios abertos.", ephemeral=True)
             return
         rid, raffle = abertos[-1]
+        entries = raffle.get("entries", {})
+        weighted = [(uid, int(count)) for uid, count in entries.items() if int(count) > 0]
+        total = sum(count for _, count in weighted)
+        winner_id = None
+        if total:
+            pick = secrets.randbelow(total)
+            for uid, count in weighted:
+                if pick < count:
+                    winner_id = uid
+                    break
+                pick -= count
         raffle["status"] = "encerrado"
         raffle["ended_at"] = data_iso()
+        raffle["winner_id"] = winner_id
         if not salvar_admin():
             raffle["status"] = "aberto"
+            raffle.pop("ended_at", None)
+            raffle.pop("winner_id", None)
             await interaction.response.send_message("Falha ao salvar.", ephemeral=True)
             return
-        await interaction.response.send_message(f"🔒 Sorteio **{raffle['name']}** encerrado. ID: `{rid}`", ephemeral=True)
+        if winner_id:
+            await interaction.channel.send(
+                f"🏆 **Sorteio encerrado: {raffle['name']}**\n"
+                f"Prêmio: **{raffle['prize']}**\n"
+                f"Vencedor: <@{winner_id}>!"
+            )
+            resultado = f"Sorteio encerrado. Vencedor: <@{winner_id}>."
+        else:
+            resultado = "Sorteio encerrado sem participantes."
+        await interaction.response.send_message(f"🔒 {resultado} ID: `{rid}`", ephemeral=True)
 
 
 class AdmDashboardView(discord.ui.View):
