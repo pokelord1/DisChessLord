@@ -604,6 +604,11 @@ class MissionAdminView(discord.ui.View):
     async def especial(self, interaction, button):
         await interaction.response.send_message("Escolha o objetivo da missão especial (somente administradores):", view=MissionObjectiveView(self.owner_id, "special"), ephemeral=True)
 
+    @discord.ui.button(label="Voltar", emoji="↩️", style=discord.ButtonStyle.secondary, row=1)
+    async def voltar(self, interaction, button):
+        view = DashboardView(self.owner_id, interaction.guild_id, "global")
+        await interaction.response.edit_message(embed=view.criar_embed(), view=view)
+
     @discord.ui.button(label="Listar missões", emoji="📋", style=discord.ButtonStyle.secondary)
     async def listar(self, interaction, button):
         items = list(admin_data.setdefault("missions", {}).values())
@@ -4918,6 +4923,11 @@ class DevRafflesView(discord.ui.View):
     @discord.ui.button(label="Cancelar sorteio",emoji="🗑️",style=discord.ButtonStyle.secondary)
     async def cancelar(self,i,b): await i.response.send_modal(GerenciarSorteioModal(self.owner_id,i.guild_id,"cancelar"))
 
+    @discord.ui.button(label="Voltar", emoji="↩️", style=discord.ButtonStyle.secondary, row=2)
+    async def voltar(self, interaction, button):
+        view = DashboardView(self.owner_id, interaction.guild_id, "server")
+        await interaction.response.edit_message(embed=view.criar_embed(), view=view)
+
     @discord.ui.button(label="Encerrar sorteio", emoji="🔒", style=discord.ButtonStyle.danger)
     async def encerrar(self, interaction, button):
         abertos = [(k, v) for k, v in admin_data.setdefault("raffles", {}).items() if v.get("status") == "aberto"]
@@ -5315,12 +5325,12 @@ class DashboardView(discord.ui.View):
                 ("Eventos", "🎉", self.abrir_eventos),
                 ("Torneios", "🏆", self.abrir_torneios),
                 ("Economia", "🪙", self.abrir_economia),
+                ("Sorteios", "🎟️", self.abrir_sorteios),
             ]
         else:
             botoes = [
                 ("Jogadores", "👥", self.abrir_jogadores),
                 ("Peças", "♟️", self.abrir_pecas),
-                ("Sorteios / tickets", "🎟️", self.abrir_sorteios),
                 ("Missões globais", "🎯", self.abrir_missoes),
                 ("Estatísticas", "📊", self.abrir_estatisticas),
             ]
@@ -5338,7 +5348,7 @@ class DashboardView(discord.ui.View):
             )
         return discord.Embed(
             title="🌐 Dashboard — Global",
-            description="Ferramentas e configurações compartilhadas por todos os servidores: jogadores, peças, sorteios/tickets, missões e estatísticas.",
+            description="Ferramentas compartilhadas por todos os servidores: jogadores, peças, missões e estatísticas.",
             color=discord.Color.gold()
         )
 
@@ -5511,83 +5521,32 @@ class JogadorEloModal(discord.ui.Modal):
         )
 
 
-class JogadorPatenteModal(discord.ui.Modal):
+class JogadorChessCoinsModal(discord.ui.Modal):
     def __init__(self, owner_id):
-        super().__init__(
-            title="Alterar patente manual",
-            timeout=180
-        )
-
+        super().__init__(title="Dar ChessCoins", timeout=180)
         self.owner_id = owner_id
-
-        self.user_id_input = discord.ui.TextInput(
-            label="Nick global do jogador",
-            max_length=100
-        )
-
-        self.patente_input = discord.ui.TextInput(
-            label="Patente",
-            placeholder=", ".join(PATENTES_NOMES),
-            max_length=40
-        )
-
-        self.add_item(self.user_id_input)
-        self.add_item(self.patente_input)
+        self.jogador_input = discord.ui.TextInput(label="Nick global do jogador", placeholder="Nome exato ou @menção", max_length=100)
+        self.quantia_input = discord.ui.TextInput(label="Quantidade de ChessCoins", placeholder="Ex.: 500", max_length=9)
+        self.add_item(self.jogador_input)
+        self.add_item(self.quantia_input)
 
     async def on_submit(self, interaction):
-        if (
-            interaction.user.id != self.owner_id
-            or not autorizado_dev(interaction.user.id)
-        ):
-            await interaction.response.send_message(
-                "Sem autorização.",
-                ephemeral=True
-            )
+        if interaction.user.id != self.owner_id or not autorizado_dev(interaction.user.id):
+            await interaction.response.send_message("Sem autorização.", ephemeral=True)
             return
-
-        jogador, erro = await buscar_jogador_global(self.user_id_input.value)
-        if erro:
-            await interaction.response.send_message(erro, ephemeral=True)
+        jogador, erro = await buscar_jogador_global(self.jogador_input.value)
+        try:
+            quantia = int(str(self.quantia_input.value).strip())
+            if erro or not 1 <= quantia <= 100000000:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message(erro or "Quantidade inválida. Use de 1 a 100.000.000.", ephemeral=True)
             return
-        user_id = jogador["id"]
-
-        patente = str(self.patente_input.value).strip()
-
-        if patente.lower() in (
-            "normal",
-            "automática",
-            "automatica",
-            "nenhuma"
-        ):
-            patente = None
-
-        elif patente not in PATENTES_NOMES:
-            await interaction.response.send_message(
-                "Patente não reconhecida.",
-                ephemeral=True
-            )
+        if not alterar_chesscoins(jogador["id"], quantia):
+            await interaction.response.send_message("Não foi possível salvar o saldo. Nenhuma ChessCoin foi adicionada.", ephemeral=True)
             return
-
-        dados = obter_dados_usuario(user_id)
-        anterior = copiar_json(dados)
-
-        dados["patente_override"] = patente
-
-        if not salvar_dados():
-            user_data[str(user_id)] = anterior
-
-            await interaction.response.send_message(
-                "Falha ao salvar. Alteração revertida.",
-                ephemeral=True
-            )
-            return
-
         await interaction.response.send_message(
-            (
-                "Patente manual removida."
-                if patente is None
-                else f"Patente alterada para **{patente}**."
-            ),
+            f"🪙 **{quantia:,} ChessCoins** adicionadas para **{jogador['nick']}**. Novo saldo: **{obter_chesscoins(jogador['id']):,}**.",
             ephemeral=True
         )
 
@@ -5655,112 +5614,6 @@ class JogadorTituloModal(discord.ui.Modal):
         )
 
 
-class CargoJogadorModal(discord.ui.Modal):
-    def __init__(self, owner_id, guild_id):
-        super().__init__(
-            title="Adicionar cargo ao jogador",
-            timeout=180
-        )
-
-        self.owner_id = owner_id
-        self.guild_id = guild_id
-
-        self.user_id_input = discord.ui.TextInput(
-            label="Nome ou menção do membro",
-            max_length=100
-        )
-
-        self.role_id_input = discord.ui.TextInput(
-            label="Nome exato do cargo",
-            max_length=100
-        )
-
-        self.add_item(self.user_id_input)
-        self.add_item(self.role_id_input)
-
-    async def on_submit(self, interaction):
-        if (
-            interaction.user.id != self.owner_id
-            or not autorizado_dev(interaction.user.id)
-        ):
-            await interaction.response.send_message(
-                "Sem autorização.",
-                ephemeral=True
-            )
-            return
-
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                "Use o dashboard dentro de um servidor.",
-                ephemeral=True
-            )
-            return
-
-        if interaction.guild.id != self.guild_id:
-            await interaction.response.send_message(
-                "Servidor incorreto.",
-                ephemeral=True
-            )
-            return
-
-        membro, erro_membro = buscar_membro_por_nome(interaction.guild, self.user_id_input.value)
-        nome_cargo = " ".join(str(self.role_id_input.value).split()).casefold()
-        cargos = [r for r in interaction.guild.roles if r.name.casefold() == nome_cargo]
-        cargo = cargos[0] if len(cargos) == 1 else None
-        if erro_membro or cargo is None:
-            await interaction.response.send_message(erro_membro or "Cargo não encontrado ou nome duplicado. Informe o nome exato.", ephemeral=True)
-            return
-
-        guild = interaction.guild
-
-        if membro is None or cargo is None:
-            await interaction.response.send_message(
-                "Membro ou cargo não encontrado.",
-                ephemeral=True
-            )
-            return
-
-        bot_member = guild.me
-
-        if bot_member is None:
-            await interaction.response.send_message(
-                "Não consegui identificar o bot no servidor.",
-                ephemeral=True
-            )
-            return
-
-        if not bot_member.guild_permissions.manage_roles:
-            await interaction.response.send_message(
-                "O bot precisa da permissão Gerenciar Cargos.",
-                ephemeral=True
-            )
-            return
-
-        if cargo >= bot_member.top_role:
-            await interaction.response.send_message(
-                "O cargo está acima ou no mesmo nível do cargo do bot.",
-                ephemeral=True
-            )
-            return
-
-        try:
-            await membro.add_roles(
-                cargo,
-                reason="DisChessLord Dashboard"
-            )
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "Discord recusou a alteração de cargo.",
-                ephemeral=True
-            )
-            return
-
-        await interaction.response.send_message(
-            f"Cargo **{cargo.name}** adicionado a {membro.mention}.",
-            ephemeral=True
-        )
-
-
 class JogadoresAdminView(discord.ui.View):
 
     def __init__(self, owner_id, guild_id):
@@ -5792,15 +5645,9 @@ class JogadoresAdminView(discord.ui.View):
             JogadorEloModal(self.owner_id)
         )
 
-    @discord.ui.button(
-        label="Alterar patente",
-        emoji="👑",
-        style=discord.ButtonStyle.primary
-    )
-    async def patente(self, interaction, button):
-        await interaction.response.send_modal(
-            JogadorPatenteModal(self.owner_id)
-        )
+    @discord.ui.button(label="Dar ChessCoins", emoji="🪙", style=discord.ButtonStyle.success)
+    async def chesscoins(self, interaction, button):
+        await interaction.response.send_modal(JogadorChessCoinsModal(self.owner_id))
 
     @discord.ui.button(
         label="Título especial",
@@ -5810,19 +5657,6 @@ class JogadoresAdminView(discord.ui.View):
     async def titulo(self, interaction, button):
         await interaction.response.send_modal(
             JogadorTituloModal(self.owner_id)
-        )
-
-    @discord.ui.button(
-        label="Adicionar cargo",
-        emoji="🎖️",
-        style=discord.ButtonStyle.secondary
-    )
-    async def cargo(self, interaction, button):
-        await interaction.response.send_modal(
-            CargoJogadorModal(
-                self.owner_id,
-                self.guild_id
-            )
         )
 
     @discord.ui.button(
@@ -7116,6 +6950,11 @@ class PosicionamentoAdminView(discord.ui.View):
             return False
 
         return True
+
+    @discord.ui.button(label="Voltar", emoji="↩️", style=discord.ButtonStyle.secondary, row=1)
+    async def voltar(self, interaction, button):
+        view = DashboardView(self.owner_id, self.guild_id, "global")
+        await interaction.response.edit_message(embed=view.criar_embed(), view=view)
 
     @discord.ui.button(
         label="Configurar casas",
