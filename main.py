@@ -3383,32 +3383,57 @@ def autorizado_adm(interaction):
 
 class MuteModal(discord.ui.Modal):
     def __init__(self, owner_id, mutar=True):
-        super().__init__(title="Mutar em chamada" if mutar else "Desmutar em chamada", timeout=180)
+        super().__init__(title="Silenciar membro" if mutar else "Remover silenciamento", timeout=180)
         self.owner_id = owner_id
         self.mutar = mutar
-        self.user_id_input = discord.ui.TextInput(label="ID do usuário", max_length=25)
+        self.user_id_input = discord.ui.TextInput(label="ID do membro", max_length=25)
         self.add_item(self.user_id_input)
+        self.duracao = None
+        if mutar:
+            self.duracao = discord.ui.TextInput(
+                label="Duração em minutos (1 a 40320)",
+                placeholder="Ex.: 60 = 1 hora; 1440 = 1 dia",
+                max_length=5
+            )
+            self.add_item(self.duracao)
 
     async def on_submit(self, interaction):
         if interaction.user.id != self.owner_id or not autorizado_adm(interaction):
             await interaction.response.send_message("Sem autorização.", ephemeral=True)
             return
+        if not interaction.user.guild_permissions.moderate_members:
+            await interaction.response.send_message("Você precisa da permissão de moderar membros para usar essa função.", ephemeral=True)
+            return
         try:
-            member = interaction.guild.get_member(int(str(self.user_id_input.value)))
+            uid = int(str(self.user_id_input.value).strip())
+            member = interaction.guild.get_member(uid)
             if member is None or member.id == interaction.user.id or member.top_role >= interaction.user.top_role:
                 raise ValueError
-            if member.voice is None or member.voice.channel is None:
-                await interaction.response.send_message("Esse membro não está conectado a um canal de voz.", ephemeral=True)
-                return
-            await member.edit(mute=self.mutar, reason=f"Voice mute por {interaction.user}")
-            acao = "mutado" if self.mutar else "desmutado"
+            if self.mutar:
+                minutos = int(str(self.duracao.value).strip())
+                if minutos < 1 or minutos > 40320:
+                    raise ValueError
+                await member.timeout(
+                    timedelta(minutes=minutos),
+                    reason=f"Silenciado por {interaction.user} via DisChessLord"
+                )
+                resposta = f"🔇 {member.mention} foi silenciado por **{minutos} minuto(s)**. Durante esse período, não poderá enviar mensagens nem participar de conversas que o timeout bloqueia."
+            else:
+                await member.timeout(
+                    None,
+                    reason=f"Silenciamento removido por {interaction.user} via DisChessLord"
+                )
+                resposta = f"🔊 O silenciamento de {member.mention} foi removido."
         except ValueError:
-            await interaction.response.send_message("ID inválido ou o alvo está em cargo igual/superior ao seu.", ephemeral=True)
+            await interaction.response.send_message("ID, duração inválida ou membro com cargo igual/superior ao seu. A duração deve ser de 1 a 40320 minutos.", ephemeral=True)
             return
         except discord.Forbidden:
-            await interaction.response.send_message("Não tenho permissão para mutar esse membro.", ephemeral=True)
+            await interaction.response.send_message("Não tenho permissão para silenciar esse membro. Verifique a permissão Moderar membros e a hierarquia dos cargos.", ephemeral=True)
             return
-        await interaction.response.send_message(f"✅ {member.mention} foi {acao} na chamada de voz.", ephemeral=True)
+        except discord.HTTPException as erro:
+            await interaction.response.send_message(f"Não foi possível aplicar a moderação: {erro}", ephemeral=True)
+            return
+        await interaction.response.send_message(resposta, ephemeral=True)
 
 
 class SorteioCriarModal(discord.ui.Modal):
@@ -3560,12 +3585,12 @@ class AdmDashboardView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Mutar em chamada", emoji="🔇", style=discord.ButtonStyle.danger, row=0)
-    async def mutar_membro(self, interaction, button):
+    @discord.ui.button(label="Silenciar membro", emoji="🔇", style=discord.ButtonStyle.danger, row=0)
+    async def silenciar_membro(self, interaction, button):
         await interaction.response.send_modal(MuteModal(self.owner_id, True))
 
-    @discord.ui.button(label="Desmutar em chamada", emoji="🔊", style=discord.ButtonStyle.success, row=0)
-    async def desmutar_membro(self, interaction, button):
+    @discord.ui.button(label="Remover silenciamento", emoji="🔊", style=discord.ButtonStyle.success, row=0)
+    async def remover_silenciamento(self, interaction, button):
         await interaction.response.send_modal(MuteModal(self.owner_id, False))
 
     @discord.ui.button(label="Criar sorteio", emoji="🎟️", style=discord.ButtonStyle.success, row=1)
