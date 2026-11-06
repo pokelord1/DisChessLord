@@ -4342,12 +4342,14 @@ def analisar_pgn_stockfish(texto):
                     depois_score = engine.analyse(board, chess.engine.Limit(time=ANALISE_TEMPO_POR_LANCE))["score"].pov(lado)
                     depois = (100000 if depois_score.mate() and depois_score.mate() > 0 else -100000) if depois_score.is_mate() else (depois_score.score(mate_score=100000) or 0)
                     perda = max(0, int(antes - depois))
-                    if melhor_lance == movimento and perda <= 15:
+                    if indice < 12 and melhor_lance == movimento and perda <= 15:
+                        classe = "Livro"
+                    elif melhor_lance == movimento and perda <= 15:
                         classe = "Melhor"
                     elif perda <= 20:
                         classe = "Ótimo"
                     elif perda <= 60:
-                        classe = "Bom"
+                        classe = "OK"
                     elif perda <= 120:
                         classe = "Imprecisão"
                     elif perda <= 250:
@@ -4357,7 +4359,7 @@ def analisar_pgn_stockfish(texto):
                     resultados.append({"indice": indice + 1, "san": san, "brancas": lado == chess.WHITE,
                                        "classificacao": classe, "perda": perda})
                 except (chess.engine.EngineError, ValueError):
-                    if board.peek() != movimento if board.move_stack else True:
+                    if not board.move_stack or board.peek() != movimento:
                         board.push(movimento)
                     resultados.append({"indice": indice + 1, "san": san, "brancas": lado == chess.WHITE,
                                        "classificacao": "Sem avaliação", "perda": None})
