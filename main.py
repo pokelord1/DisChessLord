@@ -637,6 +637,84 @@ def verificar_conquistas(user_id):
 
 
 
+async def localizar_membros_em_servidores(user_id):
+    """Procura o jogador em todos os servidores em que o bot está presente."""
+    encontrados = []
+    for guild in bot.guilds:
+        membro = guild.get_member(int(user_id))
+        if membro is None:
+            try:
+                membro = await guild.fetch_member(int(user_id))
+            except (discord.NotFound, discord.Forbidden):
+                continue
+            except discord.HTTPException:
+                logging.exception("Falha ao procurar o usuário %s no servidor %s.", user_id, guild.id)
+                continue
+        encontrados.append((guild, membro))
+    return encontrados
+
+
+@bot.tree.command(
+    name="configurar_denuncias",
+    description="Define o canal que receberá denúncias neste servidor."
+)
+@app_commands.describe(canal="Canal privado da staff que receberá as denúncias.")
+async def configurar_denuncias(interaction: discord.Interaction, canal: discord.TextChannel):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Use este comando dentro do servidor que deseja configurar.",
+            ephemeral=True
+        )
+        return
+
+    permissoes_usuario = interaction.user.guild_permissions
+    if not (permissoes_usuario.administrator or permissoes_usuario.manage_guild):
+        await interaction.response.send_message(
+            "Você precisa da permissão Gerenciar servidor ou Administrador.",
+            ephemeral=True
+        )
+        return
+
+    membro_bot = interaction.guild.me
+    if membro_bot is None and bot.user is not None:
+        membro_bot = interaction.guild.get_member(bot.user.id)
+    if membro_bot is None:
+        await interaction.response.send_message(
+            "Não consegui verificar minhas permissões neste servidor.",
+            ephemeral=True
+        )
+        return
+
+    permissoes_canal = canal.permissions_for(membro_bot)
+    if not (permissoes_canal.view_channel and permissoes_canal.send_messages and permissoes_canal.embed_links):
+        await interaction.response.send_message(
+            "Preciso de Ver canal, Enviar mensagens e Inserir links no canal escolhido.",
+            ephemeral=True
+        )
+        return
+
+    canais = admin_data.setdefault("settings", {}).setdefault("report_channels", {})
+    guild_key = str(interaction.guild.id)
+    anterior = canais.get(guild_key)
+    canais[guild_key] = str(canal.id)
+    if not salvar_admin():
+        if anterior is None:
+            canais.pop(guild_key, None)
+        else:
+            canais[guild_key] = anterior
+        await interaction.response.send_message(
+            "Não consegui salvar a configuração. Tente novamente.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"Canal de denúncias configurado: {canal.mention}\n"
+        "As denúncias de jogadores encontrados neste servidor serão encaminhadas para lá.",
+        ephemeral=True
+    )
+
+
 class DenunciarModal(discord.ui.Modal, title="Denunciar jogador"):
     jogador = discord.ui.TextInput(
         label="Nick global do jogador denunciado",
@@ -652,12 +730,14 @@ class DenunciarModal(discord.ui.Modal, title="Denunciar jogador"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         alvo, erro = await buscar_jogador_global(self.jogador.value)
         if erro:
-            await interaction.response.send_message(erro, ephemeral=True)
+            await interaction.followup.send(erro, ephemeral=True)
             return
         if alvo["id"] == interaction.user.id:
-            await interaction.response.send_message("Você não pode denunciar a si mesmo.", ephemeral=True)
+            await interaction.followup.send("Você não pode denunciar a si mesmo.", ephemeral=True)
             return
 
         agora = agora_utc()
@@ -671,11 +751,28 @@ class DenunciarModal(discord.ui.Modal, title="Denunciar jogador"):
             except (TypeError, ValueError):
                 continue
             if criada >= limite:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Você já enviou uma denúncia recentemente. Aguarde 5 minutos antes de enviar outra.",
                     ephemeral=True
                 )
                 return
+
+        membros_encontrados = await localizar_membros_em_servidores(alvo["id"])
+        membros_por_guild = {str(guild.id): (guild, membro) for guild, membro in membros_encontrados}
+        guild_origem_id = str(interaction.guild_id) if interaction.guild_id else None
+
+        # Se o denunciado também estiver no servidor de origem, a staff desse servidor é a responsável.
+        if guild_origem_id and guild_origem_id in membros_por_guild:
+            candidatos = [membros_por_guild[guild_origem_id]]
+        else:
+            candidatos = membros_encontrados
+
+        canais_configurados = admin_data.setdefault("settings", {}).setdefault("report_channels", {})
+        destinos = [
+            (guild, membro, str(canais_configurados[str(guild.id)]))
+            for guild, membro in candidatos
+            if canais_configurados.get(str(guild.id))
+        ]
 
         denuncia = {
             "id": gerar_id(),
@@ -684,40 +781,107 @@ class DenunciarModal(discord.ui.Modal, title="Denunciar jogador"):
             "target_id": str(alvo["id"]),
             "target_nick": alvo["nick"],
             "reason": str(self.motivo.value).strip(),
-            "guild_id": str(interaction.guild_id) if interaction.guild_id else None,
+            "guild_id": guild_origem_id,
             "channel_id": str(interaction.channel_id) if interaction.channel_id else None,
+            "target_guild_ids": [str(guild.id) for guild, _ in membros_encontrados],
+            "delivered_guild_ids": [],
             "created_at": agora.isoformat(),
             "status": "pendente"
         }
         denuncias.append(denuncia)
         if not salvar_admin():
             denuncias.pop()
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Não consegui registrar a denúncia. Tente novamente mais tarde.",
                 ephemeral=True
             )
             return
 
-        await interaction.response.send_message(
-            "✅ Denúncia registrada. A equipe responsável poderá analisá-la. Obrigado por ajudar a manter a comunidade segura.",
-            ephemeral=True
-        )
+        entregues = []
+        for guild, membro, canal_id in destinos:
+            canal = guild.get_channel(int(canal_id))
+            if canal is None:
+                try:
+                    canal = await guild.fetch_channel(int(canal_id))
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
+            if not isinstance(canal, discord.TextChannel):
+                continue
 
-        embed = discord.Embed(
-            title="🚨 Nova denúncia",
-            description=f"**Denunciante:** {denuncia['reporter_nick']}\n"
-                        f"**Denunciado:** {denuncia['target_nick']}\n"
-                        f"**Motivo:** {denuncia['reason']}\n"
-                        f"**Servidor:** {interaction.guild.name if interaction.guild else 'Fora de servidor'}\n"
-                        f"**Data:** <t:{int(agora.timestamp())}:F>",
-            color=discord.Color.orange()
-        )
-        for dev_id in USUARIOS_AUTORIZADOS_DEV:
+            membro_bot = guild.me
+            if membro_bot is None and bot.user is not None:
+                membro_bot = guild.get_member(bot.user.id)
+            if membro_bot is None:
+                continue
+            permissoes_canal = canal.permissions_for(membro_bot)
+            if not (permissoes_canal.view_channel and permissoes_canal.send_messages and permissoes_canal.embed_links):
+                continue
+
+            embed = discord.Embed(
+                title="Nova denúncia recebida",
+                description=(
+                    f"**Denunciado:** {membro.mention} (ID: {membro.id})\n"
+                    f"**Nick global:** {denuncia['target_nick']}\n"
+                    f"**Denunciante:** {interaction.user.mention} (ID: {interaction.user.id})\n"
+                    f"**Nick do denunciante:** {denuncia['reporter_nick']}\n"
+                    f"**Motivo:** {denuncia['reason']}\n"
+                    f"**Servidor de análise:** {guild.name}\n"
+                    f"**Enviada em:** <t:{int(agora.timestamp())}:F>\n"
+                    f"**Protocolo:** {denuncia['id'][:8]}"
+                ),
+                color=discord.Color.orange()
+            )
             try:
-                dev = bot.get_user(dev_id) or await bot.fetch_user(dev_id)
-                await dev.send(embed=embed)
+                await canal.send(
+                    content=f"Denúncia para análise da staff: {membro.mention}",
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions(users=[membro], roles=False, everyone=False)
+                )
+                entregues.append(str(guild.id))
             except (discord.Forbidden, discord.HTTPException):
-                logging.warning("Não foi possível enviar denúncia por DM para o desenvolvedor %s.", dev_id)
+                logging.exception(
+                    "Não foi possível encaminhar a denúncia %s ao servidor %s.",
+                    denuncia["id"],
+                    guild.id
+                )
+
+        denuncia["delivered_guild_ids"] = entregues
+        if entregues:
+            denuncia["status"] = "encaminhada"
+        elif not membros_encontrados:
+            denuncia["status"] = "jogador_nao_encontrado_em_servidor"
+        elif not destinos:
+            denuncia["status"] = "sem_canal_de_denuncias_configurado"
+        else:
+            denuncia["status"] = "falha_no_encaminhamento"
+
+        if not salvar_admin():
+            logging.error("Não foi possível atualizar o status de entrega da denúncia %s.", denuncia["id"])
+
+        if entregues:
+            await interaction.followup.send(
+                f"Denúncia registrada e encaminhada à staff de {len(entregues)} servidor(es). "
+                "A equipe responsável fará a análise; nenhuma punição é aplicada automaticamente.",
+                ephemeral=True
+            )
+        elif not membros_encontrados:
+            await interaction.followup.send(
+                "A denúncia foi salva, mas não consegui encontrar esse jogador em nenhum servidor do DisChessLord. "
+                "A equipe precisará verificar o registro manualmente.",
+                ephemeral=True
+            )
+        elif not destinos:
+            await interaction.followup.send(
+                "A denúncia foi salva, mas nenhum canal de denúncias está configurado para o(s) servidor(es) em que encontrei esse jogador. "
+                "Um administrador precisa usar /configurar_denuncias.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "A denúncia foi salva, mas não consegui enviá-la ao canal configurado. "
+                "A staff deve verificar as permissões do bot e o registro administrativo.",
+                ephemeral=True
+            )
 
 
 @bot.tree.command(name="denunciar", description="Envie uma denúncia privada sobre outro jogador.")
@@ -914,7 +1078,7 @@ def dados_admin_padrao():
         "events": {},
         "tournaments": {},
         "pieces": {},
-        "settings": {"role_prices": {}},
+        "settings": {"role_prices": {}, "report_channels": {}},
         "raffles": {},
         "missions": {},
         "reports": []
@@ -955,6 +1119,11 @@ def carregar_admin():
                 raise ValueError(
                     f"Seção administrativa inválida: {chave}"
                 )
+
+        padrao["settings"].setdefault("role_prices", {})
+        padrao["settings"].setdefault("report_channels", {})
+        if not isinstance(padrao["settings"]["report_channels"], dict):
+            raise ValueError("Configuração de canais de denúncia inválida.")
 
         if not isinstance(padrao.get("reports"), list):
             padrao["reports"] = []
@@ -6576,7 +6745,7 @@ async def help_command(interaction):
     embed.add_field(name="♟️ Comandos normais",
         value="\`/desafiar\` — desafiar jogador\n\`/nick\` — definir nick\n\`/perfil\` — consultar perfil\n\`/ranking\` — ranking de ELO\n\`/historico\` — histórico de partidas\n\`/analisar\` — ver PGN\n\`/saldo\` — saldo de ChessCoins\n\`/daily\` — resgatar 50 ChessCoins por dia\n\`/loja\` — loja de itens\n\`/conquistas\` — conquistas e recompensas\n\`/eventos\` — eventos ativos\n\`/torneios\` — torneios ativos\n\`/inscrever_torneio\` — inscrever-se\n\`/sorteios\` — sorteios abertos\n\`/participar_sorteio\` — entrar em sorteio", inline=False)
     embed.add_field(name="🛡️ Comandos administrativos",
-        value="\`/adm_dashboard\` — painel de moderação\n\`/limparchat\` — limpar mensagens (dono do servidor)", inline=False)
+        value="\`/adm_dashboard\` — painel de moderação\n\`/configurar_denuncias\` — definir canal de denúncias\n\`/limparchat\` — limpar mensagens (dono do servidor)", inline=False)
     embed.add_field(name="⚙️ Comandos de desenvolvedor",
         value="\`/dev_dashboard\` — painel completo\n\`/resetar\` — resetar perfis\n\`/dev_posicionar_peca\` — administrar peças", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
