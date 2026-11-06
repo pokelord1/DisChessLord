@@ -3742,7 +3742,10 @@ class RevancheView(discord.ui.View):
         if solicitante is None:
             old["rematch_requester"] = interaction.user.id
             await interaction.response.edit_message(
-                content=f"🔁 {nome_jogador(interaction.user.id)} pediu revanche! O outro jogador deve aceitar pela DM.",
+                content=(
+                    f"🔁 {nome_jogador(interaction.user.id)} pediu revanche! "
+                    + ("O outro jogador deve aceitar aqui no Fórum." if old.get("play_in_forum") else "O outro jogador deve aceitar pela DM.")
+                ),
                 embed=old.get("final_embed"),
                 view=self
             )
@@ -3774,23 +3777,30 @@ class RevancheView(discord.ui.View):
         game["message"] = old.get("message")
         game["public_messages"] = list(old.get("public_messages", []))
         game["dm_messages"] = dict(old.get("dm_messages", {}))
+        game["play_in_forum"] = bool(old.get("play_in_forum", False))
         active_games[tid] = game
 
         embed = criar_embed_partida(game)
+        mensagem_inicio = (
+            "🔁 Revanche aceita! A nova partida começou. Joguem pelos botões aqui no Fórum."
+            if game["play_in_forum"]
+            else "🔁 Revanche aceita! A nova partida começou. Joguem pela DM."
+        )
         await interaction.response.edit_message(
-            content="🔁 Revanche aceita! A nova partida começou. Joguem pela DM.",
+            content=mensagem_inicio,
             embed=embed,
             view=ChessBoardView(game),
             attachments=[criar_arquivo_tabuleiro(game)]
         )
-        game["dm_messages"][int(interaction.user.id)] = interaction.message
+        if not game["play_in_forum"]:
+            game["dm_messages"][int(interaction.user.id)] = interaction.message
 
         for uid, message in game["dm_messages"].items():
             if int(uid) == int(interaction.user.id):
                 continue
             try:
                 await message.edit(
-                    content="🔁 Revanche aceita! A nova partida começou. Joguem pela DM.",
+                    content=mensagem_inicio,
                     embed=embed,
                     view=ChessBoardView(game),
                     attachments=[criar_arquivo_tabuleiro(game)]
