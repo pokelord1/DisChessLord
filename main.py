@@ -9,6 +9,7 @@ import shutil
 import copy
 import math
 import secrets
+import threading
 from datetime import datetime, timezone, timedelta
 
 import discord
@@ -16,6 +17,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import chess
+import chess.engine
 import chess.pgn
 from PIL import Image, ImageDraw, ImageFont
 # ============================================================
@@ -4296,7 +4298,7 @@ STOCKFISH_PATH = os.getenv("STOCKFISH_PATH", "stockfish")
 ANALISE_TEMPO_POR_LANCE = 0.08
 ANALISE_MAX_LANCES = 160
 PRECISAO_GAMMA = 120.0
-stockfish_lock = asyncio.Lock()
+stockfish_lock = threading.Lock()
 
 
 def abrir_pgn(texto):
