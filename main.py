@@ -374,12 +374,50 @@ def alterar_chesscoins(user_id: int, quantia: int) -> bool:
         return False
     return True
 
+# Recompensas únicas por patente. As patentes Lenda aumentam progressivamente.
+RECOMPENSAS_PATENTES = {
+    "Amador": 150,
+    "Intermediário": 300,
+    "Mestre": 500,
+    "Grão-Mestre": 1000,
+    "Lenda do Xadrez I": 2000,
+    "Lenda do Xadrez II": 4000,
+    "Lenda do Xadrez III": 7000,
+    "Lenda do Xadrez IV": 11000,
+    "Lenda do Xadrez V": 16000,
+    "Lenda do Xadrez VI": 22000,
+    "Lenda do Xadrez VII": 29000,
+    "Lenda do Xadrez VIII": 37000,
+    "Lenda do Xadrez IX": 46000,
+    "Lenda do Xadrez X": 56000,
+    "Lenda do Xadrez XI": 67000,
+    "Lenda do Xadrez XII": 79000,
+    "Lenda do Xadrez XIII": 92000,
+    "Lenda do Xadrez XIV": 106000,
+    "Lenda do Xadrez XV": 121000,
+    "Lenda do Xadrez XVI": 137000,
+    "Lenda do Xadrez XVII": 154000,
+    "Lenda do Xadrez XVIII": 172000,
+    "Lenda do Xadrez XIX": 191000,
+    "Lenda do Xadrez XX": 211000,
+    "Lenda do Xadrez XXI": 232000,
+    "Deus do Xadrez": 1_000_000_000,
+}
+
 ACHIEVEMENTS = {
     "primeira_partida": {"name": "Primeiros movimentos", "description": "Jogue sua primeira partida.", "reward": 100},
     "sequencia_5": {"name": "Em chamas", "description": "Vença 5 partidas seguidas.", "reward": 250},
-    "patente_amador": {"name": "Subindo de nível", "description": "Alcance a patente Amador.", "reward": 150},
-    "patente_intermediario": {"name": "Já entende do jogo", "description": "Alcance a patente Intermediário.", "reward": 300},
 }
+for _patente, _recompensa in RECOMPENSAS_PATENTES.items():
+    _chave = "patente_amador" if _patente == "Amador" else (
+        "patente_intermediario" if _patente == "Intermediário" else
+        "patente_" + str(PATENTES_NOMES.index(_patente))
+    )
+    ACHIEVEMENTS[_chave] = {
+        "name": f"Patente: {_patente}",
+        "description": f"Alcance a patente {_patente}.",
+        "reward": _recompensa
+    }
 
 def verificar_conquistas(user_id):
     dados = obter_dados_usuario(user_id)
@@ -388,17 +426,28 @@ def verificar_conquistas(user_id):
     condicoes = {
         "primeira_partida": partidas >= 1,
         "sequencia_5": int(dados.get("current_win_streak", 0)) >= 5,
-        "patente_amador": patente in PATENTES_NOMES[PATENTES_NOMES.index("Amador"):],
-        "patente_intermediario": patente in PATENTES_NOMES[PATENTES_NOMES.index("Intermediário"):],
     }
+    # Desbloqueia somente a patente atual; as anteriores são verificadas separadamente
+    # para garantir que cada patamar seja pago uma única vez, mesmo após queda de ELO.
+    indice_atual = PATENTES_NOMES.index(patente) if patente in PATENTES_NOMES else 0
+    for nome_patente, recompensa in RECOMPENSAS_PATENTES.items():
+        indice = PATENTES_NOMES.index(nome_patente)
+        chave = "patente_amador" if nome_patente == "Amador" else (
+            "patente_intermediario" if nome_patente == "Intermediário" else
+            "patente_" + str(indice)
+        )
+        condicoes[chave] = indice_atual >= indice
+
     desbloqueadas = dados.setdefault("achievements", [])
     novas = []
+    saldo = int(dados.get("chesscoins", 0))
     for chave, concluiu in condicoes.items():
         if concluiu and chave not in desbloqueadas:
             desbloqueadas.append(chave)
             recompensa = ACHIEVEMENTS[chave]["reward"]
-            dados["chesscoins"] = obter_chesscoins(user_id) + recompensa
+            saldo += recompensa
             novas.append((ACHIEVEMENTS[chave]["name"], recompensa))
+    dados["chesscoins"] = saldo
     return novas
 
 
