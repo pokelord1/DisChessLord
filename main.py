@@ -3483,7 +3483,7 @@ class MuteModal(discord.ui.Modal):
             self.add_item(self.duracao)
 
     async def on_submit(self, interaction):
-        if interaction.user.id != self.owner_id or not autorizado_adm(interaction):
+        if interaction.user.id != self.owner_id or not autorizado_gestor_atividade(interaction):
             await interaction.response.send_message("Sem autorização.", ephemeral=True)
             return
         if not interaction.user.guild_permissions.moderate_members:
@@ -3519,6 +3519,10 @@ class MuteModal(discord.ui.Modal):
             await interaction.response.send_message(f"Não foi possível aplicar a moderação: {erro}", ephemeral=True)
             return
         await interaction.response.send_message(resposta, ephemeral=True)
+
+
+def autorizado_gestor_atividade(interaction):
+    return autorizado_dev(interaction.user.id) or autorizado_adm(interaction)
 
 
 def calcular_custo_atividade(guild, guild_id, moedas, nome_cargo):
@@ -3710,7 +3714,7 @@ class GerenciarSorteioModal(discord.ui.Modal):
         super().__init__(title="Gerenciar sorteio",timeout=180);self.owner_id=owner_id;self.guild_id=guild_id;self.acao=acao
         self.ident=discord.ui.TextInput(label="ID do sorteio",max_length=40);self.add_item(self.ident)
     async def on_submit(self,i):
-        if i.user.id!=self.owner_id or not autorizado_adm(i): await i.response.send_message("Sem autorização.",ephemeral=True);return
+        if i.user.id!=self.owner_id or not autorizado_gestor_atividade(i): await i.response.send_message("Sem autorização.",ephemeral=True);return
         rid=str(self.ident.value).strip();r=admin_data.setdefault("raffles",{}).get(rid)
         if not r or str(r.get("guild_id"))!=str(self.guild_id): await i.response.send_message("Sorteio não encontrado.",ephemeral=True);return
         if self.acao=="consultar":
@@ -4910,10 +4914,9 @@ class EventoIdModal(discord.ui.Modal):
                 value=evento.get("status", "desconhecido")
             )
 
-            embed.add_field(
-                name="Modificador",
-                value=evento.get("modifier") or "Nenhum"
-            )
+            embed.add_field(name="Premiação em ChessCoins",value=f"{int(evento.get('prize_chesscoins',0)):,}")
+            embed.add_field(name="Cargo da premiação",value=evento.get("prize_role_name") or "Nenhum")
+            embed.add_field(name="Custo cobrado",value=f"{int(evento.get('charged_coins',0)):,} ChessCoins")
 
             embed.add_field(
                 name="Término",
@@ -5250,11 +5253,9 @@ class TorneioIdModal(discord.ui.Modal):
                 value=str(len(torneio["participants"]))
             )
 
-            embed.add_field(
-                name="Premiação",
-                value=torneio.get("prize") or "Não definida",
-                inline=False
-            )
+            embed.add_field(name="Premiação em ChessCoins",value=f"{int(torneio.get('prize_chesscoins',0)):,}")
+            embed.add_field(name="Cargo da premiação",value=torneio.get("prize_role_name") or "Nenhum")
+            embed.add_field(name="Custo cobrado",value=f"{int(torneio.get('charged_coins',0)):,} ChessCoins",inline=False)
 
             await interaction.response.send_message(
                 embed=embed,
