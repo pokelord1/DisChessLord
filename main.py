@@ -3564,6 +3564,23 @@ class DashboardView(discord.ui.View):
         view.message = interaction.message
 
     @discord.ui.button(
+        label="Sorteios",
+        emoji="🎟️",
+        style=discord.ButtonStyle.success,
+        row=2
+    )
+    async def sorteios(self, interaction, button):
+        view = DevRafflesView(self.owner_id)
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="🎟️ Administração de sorteios",
+                description="Crie sorteios, distribua tickets e encerre sorteios abertos.",
+                color=discord.Color.gold()
+            ),
+            view=view
+        )
+
+    @discord.ui.button(
         label="Estatísticas",
         emoji="📊",
         style=discord.ButtonStyle.secondary,
