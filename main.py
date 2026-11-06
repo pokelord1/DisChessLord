@@ -2863,16 +2863,26 @@ async def atualizar_tabuleiro(
     view
 ):
     board = game["board"]
+    mensagem_principal = game.get("message")
+    mensagem_espelho = game.get("mirror_message")
+    mensagem_atual_id = interaction.message.id
+
+    # Descobre em qual servidor a jogada foi feita para atualizar o outro logo depois.
+    if mensagem_principal is not None and mensagem_atual_id == mensagem_principal.id:
+        outra_mensagem = mensagem_espelho
+        outra_view = game.get("mirror_view")
+    elif mensagem_espelho is not None and mensagem_atual_id == mensagem_espelho.id:
+        outra_mensagem = mensagem_principal
+        outra_view = ChessBoardView(game)
+        game["mirror_view"] = view
+    else:
+        outra_mensagem = None
+        outra_view = None
 
     if board.is_game_over():
         resultado = board.result()
         motivo = motivo_fim(board)
-
-        resultado_elo = finalizar_partida(
-            game,
-            resultado,
-            motivo
-        )
+        resultado_elo = finalizar_partida(game, resultado, motivo)
 
         if resultado_elo is None:
             await interaction.response.send_message(
@@ -2901,15 +2911,35 @@ async def atualizar_tabuleiro(
             view=RevancheView(game)
         )
 
+        if outra_mensagem is not None:
+            try:
+                await outra_mensagem.edit(
+                    content=None,
+                    embed=embed,
+                    view=RevancheView(game)
+                )
+            except discord.HTTPException:
+                logging.exception("Falha ao atualizar o tabuleiro espelhado após o fim da partida.")
         return
 
     view.rebuild()
-
     await interaction.response.edit_message(
         content=None,
         embed=criar_embed_partida(game),
         view=view
     )
+
+    # Sincroniza o segundo servidor imediatamente após atualizar a mensagem da jogada.
+    if outra_mensagem is not None and outra_view is not None:
+        try:
+            outra_view.rebuild()
+            await outra_mensagem.edit(
+                content=None,
+                embed=criar_embed_partida(game),
+                view=outra_view
+            )
+        except discord.HTTPException:
+            logging.exception("Falha ao sincronizar o tabuleiro no outro servidor.")
 
 
 # ============================================================
@@ -3236,12 +3266,6 @@ async def iniciar_sala(interaction, sala_id):
             await interaction.response.send_message("Essa mesa não está mais disponível.", ephemeral=True)
             return
         jogador = interaction.user.id
-        if str(sala.get("guild_id")) != str(interaction.guild_id):
-            await interaction.response.send_message(
-                "Essa partida foi criada em outro servidor. Entre nela pelo servidor onde foi publicada.",
-                ephemeral=True
-            )
-            return
         if not usuario_tem_nick(sala["owner"]):
             await interaction.response.send_message("O criador desta mesa ainda não definiu um nick e não pode iniciar a partida.", ephemeral=True)
             return
@@ -3285,21 +3309,24 @@ async def iniciar_sala(interaction, sala_id):
             active_games[partida_thread.id] = game
             SALAS_JOGO.pop(sala_id, None)
 
+            # Tabuleiro principal no servidor de quem aceitou a partida.
             view = ChessBoardView(game)
+            game["message"] = message
             await message.edit(
-                content=f"♟️ **{sala['name']}** — partida iniciada!",
+                content=f"♟️ **{sala['name']}** — partida entre servidores!",
                 embed=criar_embed_partida(game),
                 view=view
             )
-            game["message"] = message
 
-            # Marca a publicação original como preenchida e remove o botão antigo.
+            # A publicação original do criador vira o segundo tabuleiro.
             sala_message = sala.get("message")
             if sala_message is not None:
+                game["mirror_message"] = sala_message
+                game["mirror_view"] = ChessBoardView(game)
                 await sala_message.edit(
-                    content=f"♟️ **{sala['name']}** — partida em andamento: {partida_thread.mention}",
-                    embed=embed_sala(sala),
-                    view=None
+                    content=f"♟️ **{sala['name']}** — partida entre servidores!",
+                    embed=criar_embed_partida(game),
+                    view=game["mirror_view"]
                 )
 
             await interaction.response.send_message(
@@ -3562,12 +3589,10 @@ async def jogar(interaction, acao: str = None, nome: str = None, senha: str = No
     if forum is None:
         return
     if acao == "partidas":
-        salas = sorted([
-            x for x in SALAS_JOGO.values()
-            if sala_aberta(x)
-            and not x["private"]
-            and str(x.get("guild_id")) == str(interaction.guild_id)
-        ], key=lambda x: x["name"].casefold())
+        salas = sorted(
+            [x for x in SALAS_JOGO.values() if sala_aberta(x) and not x["private"]],
+            key=lambda x: x["name"].casefold()
+        )
         if not salas:
             await interaction.response.send_message("Não há partidas públicas disponíveis no momento.", ephemeral=True)
             return
@@ -3582,7 +3607,6 @@ async def jogar(interaction, acao: str = None, nome: str = None, senha: str = No
             x for x in SALAS_JOGO.values()
             if sala_aberta(x)
             and x["private"]
-            and str(x.get("guild_id")) == str(interaction.guild_id)
             and x["name"].casefold() == nome.strip().casefold()
         ), None)
         if sala is None or not secrets.compare_digest(str(sala["password"]), str(senha)):
@@ -3594,7 +3618,6 @@ async def jogar(interaction, acao: str = None, nome: str = None, senha: str = No
         x for x in SALAS_JOGO.values()
         if sala_aberta(x)
         and not x["private"]
-        and str(x.get("guild_id")) == str(interaction.guild_id)
         and x["owner"] != interaction.user.id
     ]
     if not salas:
