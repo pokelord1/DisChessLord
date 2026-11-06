@@ -4025,7 +4025,7 @@ class AtividadeAdmView(discord.ui.View):
 
     @discord.ui.button(label="Gerenciar sorteios",emoji="🎟️",style=discord.ButtonStyle.primary,row=1)
     async def gerenciar_sorteios(self,i,b):
-        v=GerenciarAtividadeView(self.owner_id,self.guild_id,"sorteio");await i.response.edit_message(embed=discord.Embed(title="🎟️ Gerenciar sorteios",description="Inicie, consulte, encerre ou cancele usando o ID.",color=discord.Color.gold()),view=v)
+        v=GerenciarAtividadeView(self.owner_id,self.guild_id,"sorteio");await i.response.edit_message(embed=discord.Embed(title="🎟️ Gerenciar sorteios",description="Inicie, consulte, encerre ou cancele pelo nome exato.",color=discord.Color.gold()),view=v)
     @discord.ui.button(label="Gerenciar eventos",emoji="🎉",style=discord.ButtonStyle.primary,row=1)
     async def gerenciar_eventos(self,i,b):
         v=GerenciarAtividadeView(self.owner_id,self.guild_id,"evento");await i.response.edit_message(embed=discord.Embed(title="🎉 Gerenciar eventos",description="Inicie, consulte, encerre ou cancele usando o ID.",color=discord.Color.blurple()),view=v)
@@ -5096,8 +5096,8 @@ class EventoIdModal(discord.ui.Modal):
         self.acao = acao
 
         self.evento_id = discord.ui.TextInput(
-            label="ID do evento",
-            max_length=12
+            label="Nome exato do evento",
+            max_length=80
         )
 
         self.add_item(self.evento_id)
@@ -5113,18 +5113,19 @@ class EventoIdModal(discord.ui.Modal):
             )
             return
 
-        evento_id = str(
-            self.evento_id.value
-        ).strip().upper()
-
-        evento = admin_data["events"].get(evento_id)
-
-        if evento is None:
+        nome_evento = " ".join(str(self.evento_id.value).split()).casefold()
+        encontrados = [
+            (eid, ev) for eid, ev in admin_data.get("events", {}).items()
+            if str(ev.get("guild_id")) == str(self.guild_id)
+            and " ".join(str(ev.get("name", "")).split()).casefold() == nome_evento
+        ]
+        if len(encontrados) != 1:
             await interaction.response.send_message(
-                "Evento não encontrado.",
+                "Evento não encontrado ou nome duplicado. Digite o nome exato exibido na lista de eventos.",
                 ephemeral=True
             )
             return
+        evento_id, evento = encontrados[0]
 
         if str(evento.get("guild_id")) != str(self.guild_id):
             await interaction.response.send_message(
