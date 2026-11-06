@@ -3236,6 +3236,12 @@ async def iniciar_sala(interaction, sala_id):
             await interaction.response.send_message("Essa mesa não está mais disponível.", ephemeral=True)
             return
         jogador = interaction.user.id
+        if str(sala.get("guild_id")) != str(interaction.guild_id):
+            await interaction.response.send_message(
+                "Essa partida foi criada em outro servidor. Entre nela pelo servidor onde foi publicada.",
+                ephemeral=True
+            )
+            return
         if not usuario_tem_nick(sala["owner"]):
             await interaction.response.send_message("O criador desta mesa ainda não definiu um nick e não pode iniciar a partida.", ephemeral=True)
             return
@@ -3405,9 +3411,10 @@ class CriarSalaModal(discord.ui.Modal, title="Criar mesa de xadrez"):
         sid = gerar_id()
         sala = {
             "id": sid, "name": nome, "owner": interaction.user.id,
-            "owner_name": interaction.user.display_name, "private": privada,
-            "password": senha if privada else None, "elo": elo_txt == "sim",
-            "status": "aguardando", "thread": None, "message": None
+            "owner_name": interaction.user.display_name, "guild_id": interaction.guild_id,
+            "private": privada, "password": senha if privada else None,
+            "elo": elo_txt == "sim", "status": "aguardando",
+            "thread": None, "message": None
         }
         try:
             created = await forum.create_thread(
@@ -3555,7 +3562,12 @@ async def jogar(interaction, acao: str = None, nome: str = None, senha: str = No
     if forum is None:
         return
     if acao == "partidas":
-        salas = sorted([x for x in SALAS_JOGO.values() if sala_aberta(x) and not x["private"]], key=lambda x: x["name"].casefold())
+        salas = sorted([
+            x for x in SALAS_JOGO.values()
+            if sala_aberta(x)
+            and not x["private"]
+            and str(x.get("guild_id")) == str(interaction.guild_id)
+        ], key=lambda x: x["name"].casefold())
         if not salas:
             await interaction.response.send_message("Não há partidas públicas disponíveis no momento.", ephemeral=True)
             return
@@ -3566,13 +3578,25 @@ async def jogar(interaction, acao: str = None, nome: str = None, senha: str = No
         if not nome or not senha:
             await interaction.response.send_message("Informe o nome e a senha da mesa privada.", ephemeral=True)
             return
-        sala = next((x for x in SALAS_JOGO.values() if sala_aberta(x) and x["private"] and x["name"].casefold() == nome.strip().casefold()), None)
+        sala = next((
+            x for x in SALAS_JOGO.values()
+            if sala_aberta(x)
+            and x["private"]
+            and str(x.get("guild_id")) == str(interaction.guild_id)
+            and x["name"].casefold() == nome.strip().casefold()
+        ), None)
         if sala is None or not secrets.compare_digest(str(sala["password"]), str(senha)):
             await interaction.response.send_message("Mesa privada não encontrada ou senha incorreta.", ephemeral=True)
             return
         await iniciar_sala(interaction, sala["id"])
         return
-    salas = [x for x in SALAS_JOGO.values() if sala_aberta(x) and not x["private"] and x["owner"] != interaction.user.id]
+    salas = [
+        x for x in SALAS_JOGO.values()
+        if sala_aberta(x)
+        and not x["private"]
+        and str(x.get("guild_id")) == str(interaction.guild_id)
+        and x["owner"] != interaction.user.id
+    ]
     if not salas:
         await interaction.response.send_message("Não há partidas públicas aguardando jogador. Escolha Criar para abrir uma mesa.", ephemeral=True)
         return
