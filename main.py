@@ -4255,40 +4255,44 @@ class HistoricoPartidasView(discord.ui.View):
         await self.mudar(interaction, 1)
 
 
-historico_group = app_commands.Group(name="historico", description="Consulte partidas e arquivos PGN.")
-
-@historico_group.command(name="partidas", description="Veja as partidas do histórico com paginação.")
-@app_commands.describe(jogador="Jogador cujo histórico deseja consultar", pagina="Número da página")
-async def historico_partidas(interaction, jogador: discord.Member = None,
-                             pagina: app_commands.Range[int, 1, 1000] = 1):
+@bot.tree.command(name="historico", description="Consulte partidas ou veja o PGN em texto.")
+@app_commands.describe(acao="Escolha Partidas ou PGN", pagina="Página do histórico", numero="Número da partida", jogador="Jogador")
+@app_commands.choices(acao=[app_commands.Choice(name="Partidas", value="partidas"), app_commands.Choice(name="PGN", value="pgn")])
+async def historico(interaction, acao: app_commands.Choice[str], pagina: app_commands.Range[int, 1, 1000] = 1, numero: app_commands.Range[int, 1, 1000000] = None, jogador: discord.Member = None):
     jogador = jogador or interaction.user
     partidas = list(obter_dados_usuario(jogador.id).get("history", []))
-    if not partidas:
-        await interaction.response.send_message("Esse jogador ainda não possui partidas.", ephemeral=True)
+    if acao.value == "partidas":
+        if not partidas:
+            await interaction.response.send_message("Esse jogador ainda não possui partidas.", ephemeral=True)
+            return
+        partidas.sort(key=lambda x: numero_exibicao_partida(x.get("id")), reverse=True)
+        pagina_real = min(pagina - 1, max(0, (len(partidas) - 1) // 10))
+        view = HistoricoPartidasView(interaction.user.id, jogador, partidas, pagina_real)
+        embed, _, _ = montar_embed_historico(jogador, partidas, pagina_real)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         return
-    partidas.sort(key=lambda x: numero_exibicao_partida(x.get("id")), reverse=True)
-    pagina = min(pagina - 1, max(0, (len(partidas) - 1) // 10))
-    view = HistoricoPartidasView(interaction.user.id, jogador, partidas, pagina)
-    embed, _, _ = montar_embed_historico(jogador, partidas, pagina)
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-
-@historico_group.command(name="pgn", description="Receba o arquivo PGN de uma partida.")
-@app_commands.describe(numero="Número sequencial da partida", jogador="Jogador dono da partida")
-async def historico_pgn(interaction, numero: app_commands.Range[int, 1, 1000000],
-                        jogador: discord.Member = None):
-    jogador = jogador or interaction.user
-    partidas = obter_dados_usuario(jogador.id).get("history", [])
+    if numero is None:
+        await interaction.response.send_message("Informe o número da partida no campo numero.", ephemeral=True)
+        return
     partida = next((x for x in partidas if numero_exibicao_partida(x.get("id")) == numero), None)
     pgn = str(partida.get("pgn") or "").strip() if partida else ""
     if not pgn:
         await interaction.response.send_message("Partida não encontrada ou sem PGN salvo.", ephemeral=True)
         return
-    arquivo = discord.File(io.BytesIO(pgn.encode("utf-8")), filename=f"partida_{numero}.pgn")
-    await interaction.response.send_message(f"PGN da partida #{numero}:", file=arquivo, ephemeral=True)
-
-bot.tree.add_command(historico_group)
-
+    limite = 1800
+    blocos, atual = [], ""
+    for linha in pgn.splitlines():
+        while len(linha) > limite:
+            if atual: blocos.append(atual); atual = ""
+            blocos.append(linha[:limite]); linha = linha[limite:]
+        candidato = linha if not atual else atual + "\n" + linha
+        if len(candidato) > limite: blocos.append(atual); atual = linha
+        else: atual = candidato
+    if atual: blocos.append(atual)
+    fence = chr(96) * 3
+    await interaction.response.send_message(f"**PGN da partida #{numero}**\n{fence}pgn\n{blocos[0]}\n{fence}", ephemeral=True)
+    for i, bloco in enumerate(blocos[1:], start=2):
+        await interaction.followup.send(f"**PGN #{numero} — continuação {i}/{len(blocos)}**\n{fence}pgn\n{bloco}\n{fence}", ephemeral=True)
 
 # ============================================================
 # 21. ANÁLISE DE PGN COM STOCKFISH
