@@ -212,23 +212,50 @@ def membro_em_guild(guild, user_id):
     return guild.get_member(int(user_id))
 
 
-def buscar_membro_por_nome(guild, entrada):
-    if guild is None:
-        return None, "Use este recurso dentro de um servidor."
-    texto = str(entrada or "").strip()
+async def buscar_jogador_global(entrada):
+    """Resolve jogadores pelo /nick global, mesmo fora do servidor atual."""
+    texto = " ".join(str(entrada or "").split()).strip()
+    if not texto:
+        return None, "Informe o nick global definido em /nick."
+
+    uid = None
     if texto.startswith("<@") and texto.endswith(">"):
-        uid = texto.replace("<@", "").replace("!", "").replace(">", "")
-        if uid.isdigit():
-            membro = guild.get_member(int(uid))
-            return (membro, None) if membro else (None, "Membro não encontrado.")
-    chave = " ".join(texto.split()).casefold()
-    encontrados = [m for m in guild.members if chave in {
-        " ".join(str(m.name).split()).casefold(),
-        " ".join(str(m.display_name).split()).casefold()
-    }]
-    if len(encontrados) == 1: return encontrados[0], None
-    if len(encontrados) > 1: return None, "Nome duplicado. Use a menção do Discord."
-    return None, "Membro não encontrado. Informe o nome exato ou mencione o membro."
+        candidato = texto.replace("<@", "").replace("!", "").replace(">", "")
+        if candidato.isdigit():
+            uid = int(candidato)
+    elif texto.isdigit():
+        uid = int(texto)
+
+    if uid is not None:
+        dados = user_data.get(str(uid))
+        if dados is None:
+            return None, "Esse usuário ainda não possui perfil no DisChessLord."
+        usuario = bot.get_user(uid)
+        if usuario is None:
+            try:
+                usuario = await bot.fetch_user(uid)
+            except (discord.NotFound, discord.HTTPException):
+                usuario = None
+        return {"id": uid, "nick": nome_jogador(uid), "user": usuario}, None
+
+    chave = texto.casefold()
+    encontrados = [
+        int(user_id) for user_id, dados in user_data.items()
+        if isinstance(dados, dict)
+        and str(dados.get("nickname") or "").strip().casefold() == chave
+    ]
+    if len(encontrados) == 1:
+        uid = encontrados[0]
+        usuario = bot.get_user(uid)
+        if usuario is None:
+            try:
+                usuario = await bot.fetch_user(uid)
+            except (discord.NotFound, discord.HTTPException):
+                usuario = None
+        return {"id": uid, "nick": nome_jogador(uid), "user": usuario}, None
+    if len(encontrados) > 1:
+        return None, "Há mais de um perfil com esse nick. Peça ao jogador para alterar o /nick."
+    return None, "Nick não encontrado. O jogador precisa criar o perfil e definir /nick primeiro."
 
 
 def buscar_peca_por_nome(entrada):
@@ -750,22 +777,22 @@ def numero_exibicao_partida(partida_id):
 
 
 def nome_jogador(user_id, guild=None):
-    """Retorna o nick global e identifica visualmente a conta oficial do dev."""
+    """Retorna nick global e título, sem depender do servidor da partida."""
     dados = obter_dados_usuario(user_id)
     nickname = dados.get("nickname")
     if nickname:
-        if autorizado_dev(user_id):
-            return f"☑️ {nickname}"
-        return nickname
-    membro = membro_em_guild(guild, user_id)
-    if membro:
-        nome = membro.display_name
+        nome = f"☑️ {nickname}" if autorizado_dev(user_id) else nickname
     else:
-        usuario = bot.get_user(int(user_id))
-        nome = (usuario.global_name or usuario.name) if usuario else "Jogador sem nick"
-    if autorizado_dev(user_id):
-        return f"☑️ {nome}"
-    return nome
+        membro = membro_em_guild(guild, user_id)
+        if membro:
+            nome = membro.display_name
+        else:
+            usuario = bot.get_user(int(user_id))
+            nome = (usuario.global_name or usuario.name) if usuario else "Jogador sem nick"
+        if autorizado_dev(user_id):
+            nome = f"☑️ {nome}"
+    titulo = str(dados.get("titulo") or "").strip()
+    return f"{nome} · ✨ {titulo}" if titulo else nome
 
 
 def nickname_tem_identidade_reservada(nickname):
