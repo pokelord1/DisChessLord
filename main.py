@@ -3417,12 +3417,16 @@ async def sorteios(interaction):
 
 
 @bot.tree.command(name="participar_sorteio", description="Use seus tickets para entrar em um sorteio.")
-@app_commands.describe(sorteio_id="ID do sorteio aberto")
-async def participar_sorteio(interaction, sorteio_id: str):
-    raffle = admin_data.setdefault("raffles", {}).get(sorteio_id)
-    if not raffle or raffle.get("status") != "aberto" or raffle.get("guild_id") != interaction.guild_id:
-        await interaction.response.send_message("Sorteio não encontrado ou encerrado.", ephemeral=True)
+@app_commands.describe(nome_sorteio="Nome do sorteio aberto")
+async def participar_sorteio(interaction, nome_sorteio: str):
+    nome = " ".join(nome_sorteio.strip().split()).casefold()
+    encontrados = [x for x in admin_data.setdefault("raffles", {}).values()
+                   if x.get("status") == "aberto" and x.get("guild_id") == interaction.guild_id
+                   and " ".join(str(x.get("name", "")).split()).casefold() == nome]
+    if len(encontrados) != 1:
+        await interaction.response.send_message("Sorteio não encontrado ou nome duplicado. Confira /sorteios e use o nome exato.", ephemeral=True)
         return
+    raffle = encontrados[0]
     dados = obter_dados_usuario(interaction.user.id)
     custo = int(raffle.get("ticket_cost", 1))
     saldo = int(dados.get("command_tickets", 0))
@@ -4587,7 +4591,7 @@ class CriarTorneioModal(discord.ui.Modal):
         await interaction.response.send_message(
             embed=embed_sucesso(
                 f"Torneio **{torneio['name']}** criado.\n"
-                f"ID: `{tournament_id}`\n"
+
                 f"Formato: `{formato}`\n"
                 "As inscrições estão abertas."
             ),
@@ -4606,12 +4610,12 @@ class TorneioIdModal(discord.ui.Modal):
         self.guild_id = guild_id
         self.acao = acao
 
-        self.tournament_id = discord.ui.TextInput(
-            label="ID do torneio",
-            max_length=12
+        self.tournament_name = discord.ui.TextInput(
+            label="Nome exato do torneio",
+            max_length=80
         )
 
-        self.add_item(self.tournament_id)
+        self.add_item(self.tournament_name)
 
     async def on_submit(self, interaction):
         if (
@@ -4624,13 +4628,14 @@ class TorneioIdModal(discord.ui.Modal):
             )
             return
 
-        tournament_id = str(
-            self.tournament_id.value
-        ).strip().upper()
-
-        torneio = torneio_por_id(tournament_id)
-
-        if torneio is None:
+        tournament_name = " ".join(str(self.tournament_name.value).split()).casefold()
+        encontrados = [t for t in torneios_do_servidor(self.guild_id)
+                       if " ".join(str(t.get("name", "")).split()).casefold() == tournament_name]
+        if len(encontrados) != 1:
+            await interaction.response.send_message("Torneio não encontrado ou nome duplicado. Use o nome exato exibido em /torneios.", ephemeral=True)
+            return
+        torneio = encontrados[0]
+        tournament_id = torneio["id"]
             await interaction.response.send_message(
                 "Torneio não encontrado.",
                 ephemeral=True
@@ -4651,8 +4656,8 @@ class TorneioIdModal(discord.ui.Modal):
             )
 
             embed.add_field(
-                name="ID",
-                value=tournament_id
+                name="Torneio",
+                value=torneio["name"]
             )
 
             embed.add_field(
@@ -5629,15 +5634,19 @@ async def historico_torneio(interaction):
     description="Inscreva-se em um torneio."
 )
 @app_commands.describe(
-    torneio_id="ID do torneio"
+    nome_torneio="Nome exato do torneio"
 )
 async def inscrever_torneio(
     interaction,
-    torneio_id: str
+    nome_torneio: str
 ):
-    torneio = torneio_por_id(
-        torneio_id.strip().upper()
-    )
+    nome = " ".join(nome_torneio.strip().split()).casefold()
+    encontrados = [t for t in torneios_do_servidor(interaction.guild_id)
+                   if " ".join(str(t.get("name", "")).split()).casefold() == nome]
+    if len(encontrados) != 1:
+        await interaction.response.send_message("Torneio não encontrado ou nome duplicado. Confira /torneios e use o nome exato.", ephemeral=True)
+        return
+    torneio = encontrados[0]
 
     if torneio is None:
         await interaction.response.send_message(
