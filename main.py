@@ -3690,9 +3690,9 @@ class PrecoCargoModal(discord.ui.Modal):
         super().__init__(title="Definir preço de cargo", timeout=180)
         self.owner_id = owner_id
         self.guild_id = guild_id
-        self.role_id = discord.ui.TextInput(label="ID do cargo", placeholder="Ative o modo desenvolvedor e copie o ID", max_length=25)
+        self.role_name = discord.ui.TextInput(label="Nome exato do cargo", placeholder="Ex.: Apoiador", max_length=100)
         self.price = discord.ui.TextInput(label="Preço em ChessCoins (0 para remover)", placeholder="Ex.: 2500", max_length=12)
-        self.add_item(self.role_id)
+        self.add_item(self.role_name)
         self.add_item(self.price)
 
     async def on_submit(self, interaction):
@@ -3703,7 +3703,15 @@ class PrecoCargoModal(discord.ui.Modal):
             await interaction.response.send_message("Use esta configuração no mesmo servidor em que abriu o painel.", ephemeral=True)
             return
         try:
-            role = interaction.guild.get_role(int(str(self.role_id.value).strip()))
+            nome_cargo = " ".join(str(self.role_name.value).split()).casefold()
+            encontrados = [cargo for cargo in interaction.guild.roles if cargo.name.casefold() == nome_cargo]
+            if len(encontrados) != 1:
+                if encontrados:
+                    await interaction.response.send_message("Encontrei mais de um cargo com esse nome. Renomeie um deles para ficar único e tente novamente.", ephemeral=True)
+                else:
+                    await interaction.response.send_message("Não encontrei um cargo com esse nome. Confira a escrita e tente novamente.", ephemeral=True)
+                return
+            role = encontrados[0]
             price = int(str(self.price.value).strip())
             if role is None or role.is_default() or role.managed or price < 0 or price > 1000000000:
                 raise ValueError
@@ -3712,7 +3720,7 @@ class PrecoCargoModal(discord.ui.Modal):
                 await interaction.response.send_message("Não é permitido configurar cargos iguais ou superiores ao seu cargo ou ao cargo do bot.", ephemeral=True)
                 return
         except ValueError:
-            await interaction.response.send_message("ID de cargo ou preço inválido. O preço deve ser de 0 a 1.000.000.000.", ephemeral=True)
+            await interaction.response.send_message("Nome do cargo ou preço inválido. O preço deve ser de 0 a 1.000.000.000.", ephemeral=True)
             return
         settings = admin_data.setdefault("settings", {})
         tabela = settings.setdefault("role_prices", {})
