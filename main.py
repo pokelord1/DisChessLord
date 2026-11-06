@@ -382,6 +382,33 @@ async def cmd_saldo(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+def mapa_numeros_partidas():
+    """Converte IDs antigos aleatórios em números estáveis para exibição."""
+    registros = {}
+    maior_numero = 0
+    for perfil in user_data.values():
+        if not isinstance(perfil, dict):
+            continue
+        for partida in perfil.get("history", []):
+            pid = str(partida.get("id", ""))
+            if pid.isdigit():
+                maior_numero = max(maior_numero, int(pid))
+            elif pid:
+                atual = registros.get(pid)
+                data = str(partida.get("date", ""))
+                if atual is None or data < atual:
+                    registros[pid] = data
+    ordenados = sorted(registros, key=lambda pid: (registros[pid], pid))
+    return {pid: maior_numero + i + 1 for i, pid in enumerate(ordenados)}
+
+
+def numero_exibicao_partida(partida_id):
+    pid = str(partida_id)
+    if pid.isdigit():
+        return int(pid)
+    return mapa_numeros_partidas().get(pid, 0)
+
+
 def nome_jogador(user_id, guild=None):
     """Retorna o nick global e identifica visualmente a conta oficial do dev."""
     dados = obter_dados_usuario(user_id)
@@ -2766,7 +2793,7 @@ async def historico(
         linhas.append(
             f"**{situacao}** contra {nome} "
             f"— {delta:+} ELO\n"
-            f"Partida **#{partida['id']}**"
+            f"Partida **#{numero_exibicao_partida(partida['id'])}**"
         )
 
     embed = discord.Embed(
@@ -2812,7 +2839,7 @@ async def analisar(
 
     if numero_partida is not None:
         for item in partidas:
-            if str(item.get("id")) == str(numero_partida):
+            if numero_exibicao_partida(item.get("id")) == numero_partida:
                 partida = item
                 break
     else:
@@ -2838,7 +2865,7 @@ async def analisar(
         pgn = pgn[:1800] + "\n... (reduzido)"
 
     embed = discord.Embed(
-        title=f"♟️ PGN da partida #{partida['id']}",
+        title=f"♟️ PGN da partida #{numero_exibicao_partida(partida['id'])}",
         description=(
             f"Resultado: **{partida['result']}**\n"
             f"Motivo: **{partida['reason']}**\n\n"
@@ -2864,10 +2891,14 @@ class ConfirmResetView(discord.ui.View):
         ids_reset,
         escopo,
         nomes,
-        owner_id
+        owner_id,
+        reset_titulo=False,
+        reset_nick=False
     ):
         super().__init__(timeout=TEMPO_CONFIRMACAO)
 
+        self.reset_titulo = reset_titulo
+        self.reset_nick = reset_nick
         self.ids_reset = ids_reset
         self.escopo = escopo
         self.nomes = nomes
@@ -2981,6 +3012,9 @@ class ConfirmResetView(discord.ui.View):
                     if isinstance(anterior, dict):
                         novo["chesscoins"] = int(anterior.get("chesscoins", 0))
                         novo["command_tickets"] = int(anterior.get("command_tickets", 0))
+                        novo["nickname"] = None if self.reset_nick else anterior.get("nickname")
+                        novo["titulo"] = None if self.reset_titulo else anterior.get("titulo")
+                        novo["patente_override"] = anterior.get("patente_override")
                     novo["ranking_ativo"] = False
                     user_data[user_id] = novo
 
@@ -3013,6 +3047,8 @@ class ConfirmResetView(discord.ui.View):
             "✅ Reset concluído.\n"
             f"Perfis afetados: **{len(self.ids_reset)}**\n"
             "Todos voltaram para 100 ELO.\n"
+            f"Nick resetado: **{'Sim' if self.reset_nick else 'Não'}** • "
+            f"Título resetado: **{'Sim' if self.reset_titulo else 'Não'}**\n"
             "Backup anterior criado."
         )
 
@@ -3060,8 +3096,18 @@ class ConfirmResetView(discord.ui.View):
         value="selected"
     )
 ])
+@app_commands.choices(titulo=[
+    app_commands.Choice(name="Não", value="nao"),
+    app_commands.Choice(name="Sim", value="sim")
+])
+@app_commands.choices(nick=[
+    app_commands.Choice(name="Não", value="nao"),
+    app_commands.Choice(name="Sim", value="sim")
+])
 @app_commands.describe(
     escopo="Quem será resetado",
+    titulo="Também resetar os títulos? (padrão: não)",
+    nick="Também resetar os nicks? (padrão: não)",
     jogador1="Primeiro jogador",
     jogador2="Segundo jogador",
     jogador3="Terceiro jogador",
@@ -3076,6 +3122,8 @@ class ConfirmResetView(discord.ui.View):
 async def resetar(
     interaction,
     escopo: app_commands.Choice[str],
+    titulo: app_commands.Choice[str] = None,
+    nick: app_commands.Choice[str] = None,
     jogador1: discord.User = None,
     jogador2: discord.User = None,
     jogador3: discord.User = None,
@@ -3160,17 +3208,24 @@ async def resetar(
     descricao = (
         f"Você está prestes a resetar **{len(ids_reset)} perfil(s)**.\n"
         "ELO, Peak, estatísticas e histórico serão apagados.\n"
+        f"Nick: **{'será apagado' if reset_nick else 'será mantido'}** • "
+        f"Título: **{'será apagado' if reset_titulo else 'será mantido'}**\n"
         "Um backup será criado antes."
     )
 
     if nomes:
         descricao += "\n\n" + "\n".join(nomes)
 
+    reset_titulo = bool(titulo and titulo.value == "sim")
+    reset_nick = bool(nick and nick.value == "sim")
+
     view = ConfirmResetView(
         ids_reset,
         escopo.value,
         nomes,
-        interaction.user.id
+        interaction.user.id,
+        reset_titulo=reset_titulo,
+        reset_nick=reset_nick
     )
 
     await interaction.response.send_message(
