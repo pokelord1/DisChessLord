@@ -3320,7 +3320,12 @@ async def iniciar_sala(interaction, sala_id):
             game["message"] = message
             game["public_messages"] = [message]
             sala_message = sala.get("message")
-            if sala_message is not None:
+            thread_original = sala.get("thread")
+            guild_original_id = getattr(
+                getattr(thread_original, "guild", None), "id", None
+            )
+            mesma_guild = guild_original_id == partida_thread.guild.id
+            if sala_message is not None and not mesma_guild:
                 game["public_messages"].append(sala_message)
 
             dm_embed = criar_embed_partida(game)
@@ -3371,6 +3376,22 @@ async def iniciar_sala(interaction, sala_id):
                     embed=dm_embed,
                     view=None
                 )
+
+            # Se os dois jogadores forem do mesmo servidor, a publicação antiga
+            # deixa de ser um segundo tabuleiro e vira apenas um aviso de mudança.
+            if sala_message is not None and mesma_guild:
+                try:
+                    await sala_message.edit(
+                        content=(
+                            f"♟️ A partida foi iniciada. O tabuleiro para acompanhar "
+                            f"está em {partida_thread.mention}; para jogar, use a DM "
+                            "enviada pelo DisChessLord."
+                        ),
+                        embed=None,
+                        view=None
+                    )
+                except (discord.Forbidden, discord.HTTPException):
+                    logging.exception("Falha ao atualizar a publicação original da sala.")
 
             await interaction.response.send_message(
                 f"Você entrou em **{sala['name']}**!\n"
