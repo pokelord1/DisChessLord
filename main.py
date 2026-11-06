@@ -3483,7 +3483,7 @@ class MuteModal(discord.ui.Modal):
             self.add_item(self.duracao)
 
     async def on_submit(self, interaction):
-        if interaction.user.id != self.owner_id or not autorizado_gestor_atividade(interaction):
+        if interaction.user.id != self.owner_id or not autorizado_adm(interaction):
             await interaction.response.send_message("Sem autorização.", ephemeral=True)
             return
         if not interaction.user.guild_permissions.moderate_members:
