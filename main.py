@@ -8,7 +8,6 @@ import logging
 import shutil
 import copy
 import math
-
 from datetime import datetime, timezone, timedelta
 
 import discord
@@ -17,14 +16,16 @@ from discord.ext import commands
 
 import chess
 import chess.pgn
+from supabase import create_client, Client
 
-# Conexão com o mesmo banco do Supabase
+# Conexão com o Supabase (lê as variáveis configuradas na FadeHost)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Função para consultar o saldo do usuário no Supabase
+# --- FUNÇÕES DO BANCO DE DADOS (CHESSCOINS) ---
+
 def obter_chesscoins(user_id: int) -> int:
     try:
         res = supabase.table("chesscoins").select("saldo").eq("user_id", str(user_id)).execute()
@@ -35,8 +36,11 @@ def obter_chesscoins(user_id: int) -> int:
         print(f"Erro ao ler saldo: {e}")
         return 0
 
-# Função para alterar o saldo (gastar ou ganhar moedas no DisChessLord)
 def alterar_chesscoins(user_id: int, quantia: int):
+    """
+    Adiciona ou remove moedas. 
+    Use valores positivos para somar (ex: 100) e negativos para descontar (ex: -50).
+    """
     saldo_atual = obter_chesscoins(user_id)
     novo_saldo = max(0, saldo_atual + quantia)
     try:
@@ -44,15 +48,16 @@ def alterar_chesscoins(user_id: int, quantia: int):
             {"user_id": str(user_id), "saldo": novo_saldo}
         ).execute()
     except Exception as e:
-        print(f"Erro ao salvar saldo: {e}")
+        print(f"Erro ao salvar saldo no Supabase: {e}")
 
-# Comando Slash para a galera checar o saldo de Chesscoins
+# --- COMANDO SLASH PARA CONSULTAR SALDO ---
+
 @bot.tree.command(name="saldo", description="Veja seu saldo de Chesscoins!")
 async def cmd_saldo(interaction: discord.Interaction):
     saldo = obter_chesscoins(interaction.user.id)
     embed = discord.Embed(
         title="🪙 Sua Carteira de Chesscoins",
-        description=f"Você possui atualmente **{saldo} 🪙 Chesscoins**!",
+        description=f"Você possui **{saldo} 🪙 Chesscoins**!",
         color=discord.Color.blue()
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
