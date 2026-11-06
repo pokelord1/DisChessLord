@@ -3521,6 +3521,36 @@ class MuteModal(discord.ui.Modal):
         await interaction.response.send_message(resposta, ephemeral=True)
 
 
+def calcular_custo_atividade(guild, guild_id, moedas, nome_cargo):
+    moedas=int(moedas or 0)
+    if moedas<0 or moedas>10000: raise ValueError("ChessCoins deve ficar entre 0 e 10.000.")
+    nome=" ".join(str(nome_cargo or "").split());cargo=None;preco=0
+    if nome:
+        achados=[x for x in guild.roles if x.name.casefold()==nome.casefold()]
+        if len(achados)!=1: raise ValueError("Cargo não encontrado ou nome duplicado.")
+        cargo=achados[0];preco=obter_preco_cargo_premiacao(guild_id,cargo)
+        if preco is None: raise ValueError("Cargo de patente/administrador não pode ser prêmio.")
+    if not moedas and cargo is None: raise ValueError("Informe ChessCoins ou um cargo como premiação.")
+    base=moedas+preco;taxa=math.ceil(base*0.01)
+    return moedas,cargo,preco,base+taxa,taxa
+
+
+def iniciar_atividade_com_cobranca(interaction,item,tipo):
+    if item.get("started_at"): return False,"Esta atividade já foi iniciada."
+    try: moedas,cargo,preco,total,taxa=calcular_custo_atividade(interaction.guild,interaction.guild_id,item.get("prize_chesscoins",0),item.get("prize_role_name",""))
+    except ValueError as e: return False,str(e)
+    saldo=obter_chesscoins(interaction.user.id)
+    if saldo<total: return False,f"Saldo insuficiente: custo **{total:,}**, saldo **{saldo:,}**."
+    anterior=copiar_json(item)
+    if not alterar_chesscoins(interaction.user.id,-total): return False,"Não foi possível cobrar."
+    agora=agora_utc()
+    item.update(started_at=agora.isoformat(),charged_coins=total,fee_charged=taxa,prize_role_id=str(cargo.id) if cargo else None,prize_role_name=cargo.name if cargo else None,prize_role_price=preco,status="ativo" if tipo=="evento" else "inscricoes",ends_at=(agora+timedelta(hours=int(item.get("duration_hours",24)))).isoformat())
+    if not salvar_admin():
+        item.clear();item.update(anterior);alterar_chesscoins(interaction.user.id,total)
+        return False,"Falha ao salvar; cobrança revertida."
+    return True,f"Iniciado! Cobrança: **{total:,} ChessCoins** (taxa: {taxa:,})."
+
+
 class SorteioCriarModal(discord.ui.Modal):
     def __init__(self, owner_id):
         super().__init__(title="Criar sorteio", timeout=180)
@@ -3548,7 +3578,7 @@ class SorteioCriarModal(discord.ui.Modal):
         admin_data.setdefault("raffles", {})[rid] = {
             "id": rid, "name": nome,
             "prize": premio, "ticket_cost": 0,
-            "status": "aberto", "entries": {}, "created_at": data_iso(),
+            "status": "preparacao", "entries": {}, "created_at": data_iso(),
             "guild_id": interaction.guild_id, "channel_id": interaction.channel_id,
             "created_by": interaction.user.id
         }
@@ -3559,7 +3589,7 @@ class SorteioCriarModal(discord.ui.Modal):
             salvar_dados()
             await interaction.response.send_message("Falha ao salvar o sorteio; ticket devolvido.", ephemeral=True)
             return
-        await interaction.response.send_message(f"🎟️ Sorteio **{nome}** criado! Foi usado 1 ticket administrativo. Restam **{saldo_tickets - 1}**.", ephemeral=True)
+        await interaction.response.send_message(f"🎟️ Sorteio **{nome}** criado e aguardando início! Foi usado 1 ticket administrativo. Restam **{saldo_tickets - 1}**.", ephemeral=False)
 
 
 class TicketsModal(discord.ui.Modal):
@@ -4651,17 +4681,13 @@ class CriarEventoModal(discord.ui.Modal):
             max_length=5
         )
 
-        self.modificador = discord.ui.TextInput(
-            label="Modificador/regras especiais",
-            placeholder="Ex.: bônus de participação",
-            required=False,
-            max_length=200
-        )
-
+        self.premio_moedas = discord.ui.TextInput(label="Premiação em ChessCoins (opcional)", required=False, max_length=6)
+        self.premio_cargo = discord.ui.TextInput(label="Cargo da premiação (opcional)", required=False, max_length=100)
         self.add_item(self.nome)
         self.add_item(self.descricao)
         self.add_item(self.duracao)
-        self.add_item(self.modificador)
+        self.add_item(self.premio_moedas)
+        self.add_item(self.premio_cargo)
 
     async def on_submit(self, interaction):
         if (
@@ -4683,8 +4709,8 @@ class CriarEventoModal(discord.ui.Modal):
 
         try:
             horas = int(str(self.duracao.value))
-
-            if horas < 1 or horas > 720:
+            moedas = int(str(self.premio_moedas.value or "0").strip() or "0")
+            if horas < 1 or horas > 720 or moedas < 0 or moedas > 10000:
                 raise ValueError
 
         except ValueError:
@@ -4704,8 +4730,11 @@ class CriarEventoModal(discord.ui.Modal):
             "creator_id": str(self.owner_id),
             "name": str(self.nome.value).strip(),
             "description": str(self.descricao.value).strip(),
-            "modifier": str(self.modificador.value).strip(),
-            "status": "ativo",
+            "modifier": "",
+            "prize_chesscoins": moedas,
+            "prize_role_name": str(self.premio_cargo.value).strip(),
+            "duration_hours": horas,
+            "status": "preparacao",
             "starts_at": inicio.isoformat(),
             "ends_at": fim.isoformat(),
             "created_at": inicio.isoformat()
@@ -4728,11 +4757,11 @@ class CriarEventoModal(discord.ui.Modal):
 
         await interaction.response.send_message(
             embed=embed_sucesso(
-                f"Evento **{evento['name']}** criado.\n"
+                f"Evento **{evento['name']}** criado e aguardando início.\n"
                 f"ID: `{evento_id}`\n"
-                f"Duração: {horas} horas."
+                f"Duração: {horas} horas. A cobrança será feita ao iniciar."
             ),
-            ephemeral=True
+            ephemeral=False
         )
 
 
@@ -4757,7 +4786,7 @@ class EventoIdModal(discord.ui.Modal):
     async def on_submit(self, interaction):
         if (
             interaction.user.id != self.owner_id
-            or not autorizado_dev(interaction.user.id)
+            or not autorizado_adm(interaction)
         ):
             await interaction.response.send_message(
                 "Sem autorização.",
@@ -4817,6 +4846,11 @@ class EventoIdModal(discord.ui.Modal):
                 embed=embed,
                 ephemeral=True
             )
+            return
+
+        if self.acao == "iniciar":
+            ok, msg = iniciar_atividade_com_cobranca(interaction, evento, "evento")
+            await interaction.response.send_message(msg, ephemeral=True)
             return
 
         evento_anterior = copiar_json(evento)
@@ -4971,16 +5005,13 @@ class CriarTorneioModal(discord.ui.Modal):
             max_length=5
         )
 
-        self.premio = discord.ui.TextInput(
-            label="Premiação",
-            required=False,
-            max_length=150
-        )
-
+        self.premio_moedas = discord.ui.TextInput(label="Premiação em ChessCoins (opcional)", required=False, max_length=6)
+        self.premio_cargo = discord.ui.TextInput(label="Cargo da premiação (opcional)", required=False, max_length=100)
         self.add_item(self.nome)
         self.add_item(self.formato)
         self.add_item(self.duracao)
-        self.add_item(self.premio)
+        self.add_item(self.premio_moedas)
+        self.add_item(self.premio_cargo)
 
     async def on_submit(self, interaction):
         if (
@@ -5030,14 +5061,15 @@ class CriarTorneioModal(discord.ui.Modal):
             )
             return
 
-        tournament_id, torneio = criar_dados_torneio(
-            self.guild_id,
-            self.owner_id,
-            str(self.nome.value).strip(),
-            formato,
-            horas,
-            str(self.premio.value).strip()
-        )
+        try:
+            moedas = int(str(self.premio_moedas.value or "0").strip() or "0")
+            if moedas < 0 or moedas > 10000: raise ValueError
+        except ValueError:
+            await interaction.response.send_message("Premiação inválida. Use de 0 a 10.000 ChessCoins.",ephemeral=True);return
+        if not moedas and not str(self.premio_cargo.value).strip():
+            await interaction.response.send_message("Informe pelo menos uma premiação: ChessCoins ou cargo.",ephemeral=True);return
+        tournament_id, torneio = criar_dados_torneio(self.guild_id,self.owner_id,str(self.nome.value).strip(),formato,horas,"")
+        torneio.update(prize_chesscoins=moedas,prize_role_name=str(self.premio_cargo.value).strip(),status="preparacao")
 
         async with admin_lock:
             admin_data["tournaments"][tournament_id] = torneio
@@ -5059,9 +5091,9 @@ class CriarTorneioModal(discord.ui.Modal):
                 f"Torneio **{torneio['name']}** criado.\n"
 
                 f"Formato: `{formato}`\n"
-                "As inscrições estão abertas."
+                "Aguardando início. A cobrança será calculada ao iniciar."
             ),
-            ephemeral=True
+            ephemeral=False
         )
 
 
@@ -5086,7 +5118,7 @@ class TorneioIdModal(discord.ui.Modal):
     async def on_submit(self, interaction):
         if (
             interaction.user.id != self.owner_id
-            or not autorizado_dev(interaction.user.id)
+            or not autorizado_adm(interaction)
         ):
             await interaction.response.send_message(
                 "Sem autorização.",
@@ -5146,6 +5178,11 @@ class TorneioIdModal(discord.ui.Modal):
                 embed=embed,
                 ephemeral=True
             )
+            return
+
+        if self.acao == "iniciar":
+            ok, msg = iniciar_atividade_com_cobranca(interaction, torneio, "torneio")
+            await interaction.response.send_message(msg, ephemeral=True)
             return
 
         anterior = copiar_json(torneio)
