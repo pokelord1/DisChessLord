@@ -3711,15 +3711,24 @@ def iniciar_atividade_com_cobranca(interaction, item, tipo, pagamento="coins"):
         status=status_inicio,
         ends_at=(agora + timedelta(hours=int(item.get("duration_hours", 24)))).isoformat()
     )
-    if not salvar_admin() or (pagamento == "ticket" and not salvar_dados()):
-        item.clear()
-        item.update(anterior)
-        if pagamento == "ticket":
+    if pagamento == "ticket":
+        if not salvar_dados():
+            item.clear()
+            item.update(anterior)
+            dados["command_tickets"] = saldo_anterior
+            return False, "Falha ao salvar o ticket; início cancelado."
+        if not salvar_admin():
+            item.clear()
+            item.update(anterior)
             dados["command_tickets"] = saldo_anterior
             salvar_dados()
-        else:
-            alterar_chesscoins(interaction.user.id, total)
-        return False, "Falha ao salvar; cobrança revertida."
+            salvar_admin()
+            return False, "Falha ao salvar a atividade; ticket devolvido."
+    elif not salvar_admin():
+        item.clear()
+        item.update(anterior)
+        alterar_chesscoins(interaction.user.id, total)
+        return False, "Falha ao salvar; cobrança em ChessCoins revertida."
     if pagamento == "ticket":
         return True, "Iniciado! Pagamento: **1 ticket administrativo** (cobre o custo completo)."
     return True, f"Iniciado! Cobrança: **{total:,} ChessCoins** (taxa: {taxa:,})."
@@ -3769,9 +3778,9 @@ def enviar_selecao_pagamento(interaction, item, tipo):
     embed = discord.Embed(
         title="Confirmar início",
         description=(
-            f"Atividade: **{item.get('name', 'Sem nome')}**\\n"
-            f"Custo calculado: **{total:,} ChessCoins** (inclui taxa de 1%)\\n"
-            "Ou pague com **1 ticket administrativo**, que cobre o custo inteiro.\\n"
+            f"Atividade: **{item.get('name', 'Sem nome')}**\n"
+            f"Custo calculado: **{total:,} ChessCoins** (inclui taxa de 1%)\n"
+            "Ou pague com **1 ticket administrativo**, que cobre o custo inteiro.\n"
             "Escolha a forma de pagamento e confirme."
         ),
         color=discord.Color.gold()
