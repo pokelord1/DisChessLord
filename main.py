@@ -4028,7 +4028,7 @@ class AtividadeAdmView(discord.ui.View):
         v=GerenciarAtividadeView(self.owner_id,self.guild_id,"sorteio");await i.response.edit_message(embed=discord.Embed(title="🎟️ Gerenciar sorteios",description="Inicie, consulte, encerre ou cancele pelo nome exato.",color=discord.Color.gold()),view=v)
     @discord.ui.button(label="Gerenciar eventos",emoji="🎉",style=discord.ButtonStyle.primary,row=1)
     async def gerenciar_eventos(self,i,b):
-        v=GerenciarAtividadeView(self.owner_id,self.guild_id,"evento");await i.response.edit_message(embed=discord.Embed(title="🎉 Gerenciar eventos",description="Inicie, consulte, encerre ou cancele usando o ID.",color=discord.Color.blurple()),view=v)
+        v=GerenciarAtividadeView(self.owner_id,self.guild_id,"evento");await i.response.edit_message(embed=discord.Embed(title="🎉 Gerenciar eventos",description="Inicie, consulte, encerre ou cancele pelo nome exato.",color=discord.Color.blurple()),view=v)
     @discord.ui.button(label="Gerenciar torneios",emoji="🏆",style=discord.ButtonStyle.primary,row=1)
     async def gerenciar_torneios(self,i,b):
         v=GerenciarAtividadeView(self.owner_id,self.guild_id,"torneio");await i.response.edit_message(embed=discord.Embed(title="🏆 Gerenciar torneios",description="Inicie, consulte, encerre ou cancele usando o nome exato.",color=discord.Color.gold()),view=v)
@@ -4243,262 +4243,119 @@ class EconomiaCargosView(discord.ui.View):
 
 
 class DashboardView(discord.ui.View):
-
-    def __init__(self, owner_id, guild_id):
+    def __init__(self, owner_id, guild_id, tab="server"):
         super().__init__(timeout=180)
-
         self.owner_id = owner_id
         self.guild_id = guild_id
+        self.tab = tab
+        self._montar()
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.owner_id:
-            await interaction.response.send_message(
-                "Esse dashboard pertence a outro usuário.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("Esse dashboard pertence a outro usuário.", ephemeral=True)
             return False
-
         if not autorizado_dev(interaction.user.id):
-            await interaction.response.send_message(
-                "Você não tem autorização.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("Você não tem autorização.", ephemeral=True)
             return False
-
         return True
 
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
-
         if hasattr(self, "message") and self.message:
             try:
                 await self.message.edit(view=self)
             except discord.HTTPException:
                 pass
 
-    @discord.ui.button(
-        label="Jogadores",
-        emoji="👥",
-        style=discord.ButtonStyle.primary,
-        row=0
-    )
-    async def jogadores(self, interaction, button):
-        view = JogadoresAdminView(
-            self.owner_id,
-            self.guild_id
-        )
+    def _montar(self):
+        self.clear_items()
+        servidor = discord.ui.Button(label="Servidor", emoji="🏠", style=discord.ButtonStyle.primary if self.tab == "server" else discord.ButtonStyle.secondary, row=0)
+        global_btn = discord.ui.Button(label="Global", emoji="🌐", style=discord.ButtonStyle.primary if self.tab == "global" else discord.ButtonStyle.secondary, row=0)
+        servidor.callback = self.abrir_servidor
+        global_btn.callback = self.abrir_global
+        self.add_item(servidor)
+        self.add_item(global_btn)
 
-        await interaction.response.edit_message(
-            embed=discord.Embed(
-                title="👥 Administração de jogadores",
-                description=(
-                    "Escolha uma ação para administrar perfis."
-                ),
+        if self.tab == "server":
+            botoes = [
+                ("Eventos", "🎉", self.abrir_eventos),
+                ("Torneios", "🏆", self.abrir_torneios),
+                ("Economia", "🪙", self.abrir_economia),
+            ]
+        else:
+            botoes = [
+                ("Jogadores", "👥", self.abrir_jogadores),
+                ("Peças", "♟️", self.abrir_pecas),
+                ("Sorteios / tickets", "🎟️", self.abrir_sorteios),
+                ("Missões globais", "🎯", self.abrir_missoes),
+                ("Estatísticas", "📊", self.abrir_estatisticas),
+            ]
+        for label, emoji, callback in botoes:
+            button = discord.ui.Button(label=label, emoji=emoji, style=discord.ButtonStyle.success, row=1)
+            button.callback = callback
+            self.add_item(button)
+
+    def criar_embed(self):
+        if self.tab == "server":
+            return discord.Embed(
+                title="🏠 Dashboard — Servidor",
+                description="Configurações e atividades que afetam somente este servidor: eventos, torneios e preços de cargos.",
                 color=discord.Color.blurple()
-            ),
-            view=view
-        )
-
-        view.message = interaction.message
-
-    @discord.ui.button(
-        label="Eventos",
-        emoji="🎉",
-        style=discord.ButtonStyle.primary,
-        row=0
-    )
-    async def eventos(self, interaction, button):
-        view = EventosAdminView(
-            self.owner_id,
-            self.guild_id
-        )
-
-        await interaction.response.edit_message(
-            embed=discord.Embed(
-                title="🎉 Administração de eventos",
-                description=(
-                    "Crie, consulte, encerre ou cancele eventos."
-                ),
-                color=discord.Color.blurple()
-            ),
-            view=view
-        )
-
-        view.message = interaction.message
-
-    @discord.ui.button(
-        label="Torneios",
-        emoji="🏆",
-        style=discord.ButtonStyle.primary,
-        row=0
-    )
-    async def torneios(self, interaction, button):
-        view = TorneiosAdminView(
-            self.owner_id,
-            self.guild_id
-        )
-
-        await interaction.response.edit_message(
-            embed=discord.Embed(
-                title="🏆 Administração de torneios",
-                description=(
-                    "Gerencie inscrições e torneios internos."
-                ),
-                color=discord.Color.gold()
-            ),
-            view=view
-        )
-
-        view.message = interaction.message
-
-    @discord.ui.button(
-        label="Peças",
-        emoji="♟️",
-        style=discord.ButtonStyle.primary,
-        row=1
-    )
-    async def pecas(self, interaction, button):
-        view = PecasAdminView(
-            self.owner_id,
-            self.guild_id
-        )
-
-        await interaction.response.edit_message(
-            embed=discord.Embed(
-                title="♟️ Biblioteca de peças",
-                description=(
-                    "Crie, edite, duplique e remova peças personalizadas."
-                ),
-                color=discord.Color.blurple()
-            ),
-            view=view
-        )
-
-        view.message = interaction.message
-
-    @discord.ui.button(
-        label="Sorteios",
-        emoji="🎟️",
-        style=discord.ButtonStyle.success,
-        row=2
-    )
-    async def sorteios(self, interaction, button):
-        view = DevRafflesView(self.owner_id)
-        await interaction.response.edit_message(
-            embed=discord.Embed(
-                title="🎟️ Administração de sorteios",
-                description="Crie sorteios, distribua tickets e encerre sorteios abertos.",
-                color=discord.Color.gold()
-            ),
-            view=view
-        )
-
-    @discord.ui.button(
-        label="Economia",
-        emoji="🪙",
-        style=discord.ButtonStyle.success,
-        row=3
-    )
-    async def economia(self, interaction, button):
-        view = EconomiaCargosView(self.owner_id, self.guild_id)
-        await interaction.response.edit_message(
-            embed=view.criar_embed(interaction.guild),
-            view=view
-        )
-
-    @discord.ui.button(
-        label="Estatísticas",
-        emoji="📊",
-        style=discord.ButtonStyle.secondary,
-        row=1
-    )
-    async def estatisticas(self, interaction, button):
-        total_jogadores = len(user_data)
-        total_eventos = len(admin_data["events"])
-        total_torneios = len(admin_data["tournaments"])
-        total_pecas = len(admin_data["pieces"])
-
-        embed = discord.Embed(
-            title="📊 Estatísticas do DisChessLord",
-            color=discord.Color.blurple()
-        )
-
-        embed.add_field(
-            name="Jogadores",
-            value=str(total_jogadores),
-            inline=True
-        )
-
-        embed.add_field(
-            name="Partidas ativas",
-            value=str(len(active_games)),
-            inline=True
-        )
-
-        embed.add_field(
-            name="Desafios pendentes",
-            value=str(len(pending_challenges)),
-            inline=True
-        )
-
-        embed.add_field(
-            name="Eventos",
-            value=str(total_eventos),
-            inline=True
-        )
-
-        embed.add_field(
-            name="Torneios",
-            value=str(total_torneios),
-            inline=True
-        )
-
-        embed.add_field(
-            name="Peças personalizadas",
-            value=str(total_pecas),
-            inline=True
-        )
-
-        await interaction.response.edit_message(
-            embed=embed,
-            view=DashboardView(
-                self.owner_id,
-                self.guild_id
             )
+        return discord.Embed(
+            title="🌐 Dashboard — Global",
+            description="Ferramentas e configurações compartilhadas por todos os servidores: jogadores, peças, sorteios/tickets, missões e estatísticas.",
+            color=discord.Color.gold()
         )
 
-    @discord.ui.button(
-        label="Missões globais",
-        emoji="🎯",
-        style=discord.ButtonStyle.success,
-        row=2
-    )
-    async def missoes_globais(self, interaction, button):
-        await interaction.response.edit_message(
-            embed=discord.Embed(
-                title="🎯 Missões globais",
-                description="Crie missões normais para todos os jogadores e missões especiais para administradores. O bot acompanha partidas e concede a recompensa automaticamente.",
-                color=discord.Color.gold()
-            ),
-            view=MissionAdminView(self.owner_id)
-        )
+    async def _trocar(self, interaction, tab):
+        self.tab = tab
+        self._montar()
+        await interaction.response.edit_message(embed=self.criar_embed(), view=self)
 
-    @discord.ui.button(
-        label="Voltar",
-        emoji="↩️",
-        style=discord.ButtonStyle.secondary,
-        row=1
-    )
-    async def voltar(self, interaction, button):
-        await interaction.response.edit_message(
-            embed=discord.Embed(
-                title="🛠️ DisChessLord — Dashboard",
-                description="Painel administrativo principal.",
-                color=discord.Color.blurple()
-            ),
-            view=self
-        )
+    async def abrir_servidor(self, interaction):
+        await self._trocar(interaction, "server")
+
+    async def abrir_global(self, interaction):
+        await self._trocar(interaction, "global")
+
+    async def abrir_jogadores(self, interaction):
+        view = JogadoresAdminView(self.owner_id, self.guild_id)
+        await interaction.response.edit_message(embed=discord.Embed(title="👥 Administração global de jogadores", description="Gerencie perfis e dados dos jogadores.", color=discord.Color.blurple()), view=view)
+
+    async def abrir_eventos(self, interaction):
+        view = EventosAdminView(self.owner_id, self.guild_id)
+        await interaction.response.edit_message(embed=discord.Embed(title="🎉 Administração de eventos do servidor", description="Crie, consulte, encerre ou cancele eventos deste servidor.", color=discord.Color.blurple()), view=view)
+
+    async def abrir_torneios(self, interaction):
+        view = TorneiosAdminView(self.owner_id, self.guild_id)
+        await interaction.response.edit_message(embed=discord.Embed(title="🏆 Administração de torneios do servidor", description="Gerencie torneios deste servidor.", color=discord.Color.gold()), view=view)
+
+    async def abrir_pecas(self, interaction):
+        view = PecasAdminView(self.owner_id, self.guild_id)
+        await interaction.response.edit_message(embed=discord.Embed(title="♟️ Biblioteca global de peças", description="Crie, edite, duplique e remova peças personalizadas.", color=discord.Color.blurple()), view=view)
+
+    async def abrir_sorteios(self, interaction):
+        view = DevRafflesView(self.owner_id)
+        await interaction.response.edit_message(embed=discord.Embed(title="🎟️ Sorteios e tickets globais", description="Administre sorteios e distribuição de tickets.", color=discord.Color.gold()), view=view)
+
+    async def abrir_economia(self, interaction):
+        view = EconomiaCargosView(self.owner_id, self.guild_id)
+        await interaction.response.edit_message(embed=view.criar_embed(interaction.guild), view=view)
+
+    async def abrir_missoes(self, interaction):
+        await interaction.response.edit_message(embed=discord.Embed(title="🎯 Missões globais", description="Crie missões normais para todos os jogadores e missões especiais exclusivas para administradores. O bot acompanha as partidas e entrega as recompensas automaticamente.", color=discord.Color.gold()), view=MissionAdminView(self.owner_id))
+
+    async def abrir_estatisticas(self, interaction):
+        embed = discord.Embed(title="📊 Estatísticas globais do DisChessLord", color=discord.Color.blurple())
+        embed.add_field(name="Jogadores", value=str(len(user_data)), inline=True)
+        embed.add_field(name="Partidas ativas", value=str(len(active_games)), inline=True)
+        embed.add_field(name="Desafios pendentes", value=str(len(pending_challenges)), inline=True)
+        embed.add_field(name="Eventos (todos servidores)", value=str(len(admin_data.get("events", {}))), inline=True)
+        embed.add_field(name="Torneios (todos servidores)", value=str(len(admin_data.get("tournaments", {}))), inline=True)
+        embed.add_field(name="Peças personalizadas", value=str(len(admin_data.get("pieces", {}))), inline=True)
+        await interaction.response.edit_message(embed=embed, view=DashboardView(self.owner_id, self.guild_id, "global"))
 
 
 @bot.tree.command(
@@ -4515,12 +4372,8 @@ async def dev_dashboard(interaction):
 
     view = DashboardView(
         interaction.user.id,
-        interaction.guild_id
-    )
-
-    view = DashboardView(
-        interaction.user.id,
-        interaction.guild_id
+        interaction.guild_id,
+        "server" if interaction.guild_id else "global"
     )
 
     await interaction.response.send_message(
