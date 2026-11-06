@@ -1646,8 +1646,10 @@ def gerar_imagem_tabuleiro(game):
     try:
         fonte = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 58)
         coords = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
+        fonte_com_simbolos = True
     except OSError:
         fonte, coords = ImageFont.load_default(), ImageFont.load_default()
+        fonte_com_simbolos = False
     claro, escuro = "#f0d9b5", "#779556"
     selecionada = game.get("selected_square")
     ultimo_lance = set()
@@ -1662,6 +1664,11 @@ def gerar_imagem_tabuleiro(game):
         chess.ROOK: ("♖", "♜"), chess.BISHOP: ("♗", "♝"),
         chess.KNIGHT: ("♘", "♞"), chess.PAWN: ("♙", "♟"),
     }
+    simbolos_fallback = {
+        chess.KING: ("K", "K"), chess.QUEEN: ("Q", "Q"),
+        chess.ROOK: ("R", "R"), chess.BISHOP: ("B", "B"),
+        chess.KNIGHT: ("N", "N"), chess.PAWN: ("P", "P"),
+    }
     for rank in range(8):
         for file_index in range(8):
             square = chess.square(file_index, 7 - rank)
@@ -1675,7 +1682,8 @@ def gerar_imagem_tabuleiro(game):
             desenho.rectangle((x0, y0, x1, y1), fill=cor)
             peca = board.piece_at(square)
             if peca:
-                simbolo = simbolos[peca.piece_type][0 if peca.color else 1]
+                conjunto = simbolos if fonte_com_simbolos else simbolos_fallback
+                simbolo = conjunto[peca.piece_type][0 if peca.color else 1]
                 caixa = desenho.textbbox((0, 0), simbolo, font=fonte, stroke_width=1)
                 largura, altura = caixa[2] - caixa[0], caixa[3] - caixa[1]
                 px = x0 + (casa - largura) / 2 - caixa[0]
@@ -3015,7 +3023,8 @@ async def atualizar_tabuleiro(
         await interaction.response.edit_message(
             content=None,
             embed=embed,
-            view=RevancheView(game)
+            view=RevancheView(game),
+            attachments=[criar_arquivo_tabuleiro(game)]
         )
         await sincronizar_interfaces_partida(game, embed=embed, final=True)
         return
