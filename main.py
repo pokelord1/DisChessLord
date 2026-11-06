@@ -3248,13 +3248,7 @@ async def iniciar_sala(interaction, sala_id):
                     f"♟️ **{sala['name']}** — partida iniciada!\n"
                     f"Brancas: <@{sala['owner']}>\n"
                     f"Pretas: <@{jogador}>"
-                ),
-                embed=criar_embed_partida({
-                    "white": sala["owner"],
-                    "black": jogador,
-                    "board": chess.Board(),
-                    "elo_enabled": bool(sala["elo"])
-                })
+                )
             )
             partida_thread = getattr(created, "thread", None)
             message = getattr(created, "message", None)
