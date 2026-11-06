@@ -3573,6 +3573,62 @@ class DevRafflesView(discord.ui.View):
         await interaction.response.send_message(f"🔒 {resultado} ID: `{rid}`", ephemeral=True)
 
 
+class AtividadeAdmView(discord.ui.View):
+    def __init__(self, owner_id, guild_id):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id or not autorizado_adm(interaction):
+            await interaction.response.send_message("Sem autorização para este painel.", ephemeral=True)
+            return False
+        return True
+
+    def criar_embed(self):
+        eventos = [x for x in admin_data.get("events", {}).values()
+                   if x.get("status") in ("ativo", "aberto") and str(x.get("guild_id")) == str(self.guild_id)]
+        torneios = [x for x in admin_data.get("tournaments", {}).values()
+                    if x.get("status") in ("inscricoes", "inscrições", "ativo") and str(x.get("guild_id")) == str(self.guild_id)]
+        sorteios = [x for x in admin_data.get("raffles", {}).values()
+                    if x.get("status") == "aberto" and str(x.get("guild_id")) == str(self.guild_id)]
+
+        def linhas(items):
+            return "\n".join("• " + str(x.get("name", "Sem nome")) for x in items[:8]) or "Nenhum"
+
+        embed = discord.Embed(title="📋 Atividade do servidor", color=discord.Color.blurple())
+        embed.add_field(name=f"🎉 Eventos ativos ({len(eventos)})", value=linhas(eventos), inline=False)
+        embed.add_field(name=f"🏆 Torneios ativos ({len(torneios)})", value=linhas(torneios), inline=False)
+        embed.add_field(name=f"🎟️ Sorteios abertos ({len(sorteios)})", value=linhas(sorteios), inline=False)
+        embed.set_footer(text="Use os botões abaixo para criar uma nova atividade.")
+        return embed
+
+    @discord.ui.button(label="Criar sorteio", emoji="🎟️", style=discord.ButtonStyle.success, row=0)
+    async def criar_sorteio(self, interaction, button):
+        await interaction.response.send_modal(SorteioCriarModal(self.owner_id))
+
+    @discord.ui.button(label="Criar evento", emoji="🎉", style=discord.ButtonStyle.success, row=0)
+    async def criar_evento(self, interaction, button):
+        await interaction.response.send_modal(CriarEventoModal(self.owner_id, self.guild_id))
+
+    @discord.ui.button(label="Criar torneio", emoji="🏆", style=discord.ButtonStyle.success, row=0)
+    async def criar_torneio(self, interaction, button):
+        await interaction.response.send_modal(CriarTorneioModal(self.owner_id, self.guild_id))
+
+    @discord.ui.button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.primary, row=1)
+    async def atualizar(self, interaction, button):
+        await interaction.response.edit_message(embed=self.criar_embed(), view=self)
+
+    @discord.ui.button(label="Voltar", emoji="↩️", style=discord.ButtonStyle.secondary, row=1)
+    async def voltar(self, interaction, button):
+        await interaction.response.edit_message(
+            embed=discord.Embed(title="🛡️ DisChessLord — Painel de moderação",
+                                description="Moderação e consulta de atividades.",
+                                color=discord.Color.blurple()),
+            view=AdmDashboardView(self.owner_id, self.guild_id)
+        )
+
+
 class AdmDashboardView(discord.ui.View):
     def __init__(self, owner_id, guild_id):
         super().__init__(timeout=180)
@@ -3593,23 +3649,10 @@ class AdmDashboardView(discord.ui.View):
     async def remover_silenciamento(self, interaction, button):
         await interaction.response.send_modal(MuteModal(self.owner_id, False))
 
-    @discord.ui.button(label="Criar sorteio", emoji="🎟️", style=discord.ButtonStyle.success, row=1)
-    async def criar_sorteio(self, interaction, button):
-        await interaction.response.send_modal(SorteioCriarModal(self.owner_id))
-
     @discord.ui.button(label="Atividade", emoji="📋", style=discord.ButtonStyle.primary, row=1)
     async def atividade(self, interaction, button):
-        guild_id = interaction.guild_id
-        eventos = [x for x in admin_data.get("events", {}).values() if x.get("status") in ("ativo", "aberto") and x.get("guild_id") == guild_id]
-        torneios = [x for x in admin_data.get("tournaments", {}).values() if x.get("status") in ("inscricoes", "inscrições", "ativo") and x.get("guild_id") == guild_id]
-        sorteios = [x for x in admin_data.get("raffles", {}).values() if x.get("status") == "aberto" and x.get("guild_id") == guild_id]
-        def linhas(items):
-            return "\n".join("• " + str(x.get("name", "Sem nome")) for x in items[:8]) or "Nenhum"
-        embed = discord.Embed(title="📋 Atividade do servidor", color=discord.Color.blurple())
-        embed.add_field(name="Eventos ativos", value=linhas(eventos), inline=False)
-        embed.add_field(name="Torneios ativos", value=linhas(torneios), inline=False)
-        embed.add_field(name="Sorteios abertos", value=linhas(sorteios), inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        view = AtividadeAdmView(self.owner_id, self.guild_id)
+        await interaction.response.send_message(embed=view.criar_embed(), view=view, ephemeral=True)
 
 
 @bot.tree.command(name="adm_dashboard", description="Abre o painel de moderação do servidor.")
@@ -4532,7 +4575,7 @@ class CriarEventoModal(discord.ui.Modal):
     async def on_submit(self, interaction):
         if (
             interaction.user.id != self.owner_id
-            or not autorizado_dev(interaction.user.id)
+            or not autorizado_adm(interaction)
         ):
             await interaction.response.send_message(
                 "Sem autorização.",
@@ -4851,7 +4894,7 @@ class CriarTorneioModal(discord.ui.Modal):
     async def on_submit(self, interaction):
         if (
             interaction.user.id != self.owner_id
-            or not autorizado_dev(interaction.user.id)
+            or not autorizado_adm(interaction)
         ):
             await interaction.response.send_message(
                 "Sem autorização.",
