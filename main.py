@@ -3650,7 +3650,7 @@ class DevRafflesView(discord.ui.View):
         await interaction.response.send_modal(TicketsModal(self.owner_id))
 
     @discord.ui.button(label="Iniciar sorteio",emoji="▶️",style=discord.ButtonStyle.success)
-    async def iniciar(self,i,b): await i.response.send_modal(GerenciarSorteioModal(self.owner_id,interaction.guild_id,"iniciar"))
+    async def iniciar(self,i,b): await i.response.send_modal(GerenciarSorteioModal(self.owner_id,i.guild_id,"iniciar"))
 
     @discord.ui.button(label="Consultar sorteio",emoji="🔎",style=discord.ButtonStyle.primary)
     async def consultar(self,i,b): await i.response.send_modal(GerenciarSorteioModal(self.owner_id,i.guild_id,"consultar"))
