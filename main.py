@@ -5798,7 +5798,6 @@ class PecaIdModal(discord.ui.Modal):
             )
 
             embed.add_field(
-            embed.add_field(
                 name="Método",
                 value=peca["method"]
             )
