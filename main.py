@@ -2283,30 +2283,11 @@ class ChessBoardView(discord.ui.View):
             self.page = 0
             self.rebuild()
 
-            # Atualiza também o tabuleiro do outro servidor. Assim, quando
-            # chegar a vez do adversário, ele terá os controles das próprias peças.
+            # Existe apenas um tabuleiro: o publicado no servidor de quem começa.
             await interaction.response.edit_message(
                 embed=criar_embed_partida(self.game),
                 view=self
             )
-            mensagem_principal = self.game.get("message")
-            mensagem_espelho = self.game.get("mirror_message")
-            if mensagem_principal and mensagem_espelho:
-                outra_mensagem = (
-                    mensagem_espelho
-                    if interaction.message.id == mensagem_principal.id
-                    else mensagem_principal
-                )
-                try:
-                    outra_view = ChessBoardView(self.game)
-                    if outra_mensagem.id == mensagem_espelho.id:
-                        self.game["mirror_view"] = outra_view
-                    await outra_mensagem.edit(
-                        embed=criar_embed_partida(self.game),
-                        view=outra_view
-                    )
-                except discord.HTTPException:
-                    logging.exception("Falha ao sincronizar seleção de peça entre servidores.")
 
     def criar_callback_movimento(self, move):
 
@@ -2883,21 +2864,6 @@ async def atualizar_tabuleiro(
     view
 ):
     board = game["board"]
-    mensagem_principal = game.get("message")
-    mensagem_espelho = game.get("mirror_message")
-    mensagem_atual_id = interaction.message.id
-
-    # Descobre em qual servidor a jogada foi feita para atualizar o outro logo depois.
-    if mensagem_principal is not None and mensagem_atual_id == mensagem_principal.id:
-        outra_mensagem = mensagem_espelho
-        outra_view = game.get("mirror_view")
-    elif mensagem_espelho is not None and mensagem_atual_id == mensagem_espelho.id:
-        outra_mensagem = mensagem_principal
-        outra_view = ChessBoardView(game)
-        game["mirror_view"] = view
-    else:
-        outra_mensagem = None
-        outra_view = None
 
     if board.is_game_over():
         resultado = board.result()
@@ -2931,15 +2897,6 @@ async def atualizar_tabuleiro(
             view=RevancheView(game)
         )
 
-        if outra_mensagem is not None:
-            try:
-                await outra_mensagem.edit(
-                    content=None,
-                    embed=embed,
-                    view=RevancheView(game)
-                )
-            except discord.HTTPException:
-                logging.exception("Falha ao atualizar o tabuleiro espelhado após o fim da partida.")
         return
 
     view.rebuild()
@@ -2949,17 +2906,8 @@ async def atualizar_tabuleiro(
         view=view
     )
 
-    # Sincroniza o segundo servidor imediatamente após atualizar a mensagem da jogada.
-    if outra_mensagem is not None and outra_view is not None:
-        try:
-            outra_view.rebuild()
-            await outra_mensagem.edit(
-                content=None,
-                embed=criar_embed_partida(game),
-                view=outra_view
-            )
-        except discord.HTTPException:
-            logging.exception("Falha ao sincronizar o tabuleiro no outro servidor.")
+    # O mesmo tabuleiro é editado a cada lance; o controle passa automaticamente
+    # para o jogador indicado por board.turn, sem criar uma cópia em outro servidor.
 
 
 # ============================================================
@@ -3344,25 +3292,41 @@ async def iniciar_sala(interaction, sala_id):
             active_games[partida_thread.id] = game
             SALAS_JOGO.pop(sala_id, None)
 
-            # Tabuleiro principal no servidor de quem aceitou a partida.
+            # Um único tabuleiro é criado no Fórum do jogador sorteado para
+            # começar (as brancas). A publicação original da sala não vira cópia.
             view = ChessBoardView(game)
             game["message"] = message
             await message.edit(
-                content=f"♟️ **{sala['name']}** — partida entre servidores!",
+                content=(
+                    f"♟️ **{sala['name']}** — partida iniciada!\n"
+                    f"⚪ Brancas: <@{brancas}> (começa)\n"
+                    f"⚫ Pretas: <@{pretas}>"
+                ),
                 embed=criar_embed_partida(game),
                 view=view
             )
 
-            # A publicação original do criador vira o segundo tabuleiro.
             sala_message = sala.get("message")
             if sala_message is not None:
-                game["mirror_message"] = sala_message
-                game["mirror_view"] = ChessBoardView(game)
-                await sala_message.edit(
-                    content=f"♟️ **{sala['name']}** — partida entre servidores!",
-                    embed=criar_embed_partida(game),
-                    view=game["mirror_view"]
-                )
+                try:
+                    await sala_message.edit(
+                        content=(
+                            f"♟️ **{sala['name']}** — partida iniciada no servidor "
+                            f"de quem começa: {partida_thread.mention}"
+                        ),
+                        embed=discord.Embed(
+                            title="♟️ Partida iniciada",
+                            description=(
+                                f"O tabuleiro único está no servidor de "
+                                f"<@{brancas}>, que começa com as brancas.\n"
+                                f"Local: {partida_thread.mention}"
+                            ),
+                            color=discord.Color.blurple()
+                        ),
+                        view=None
+                    )
+                except discord.HTTPException:
+                    logging.exception("Não foi possível atualizar a publicação original da sala.")
 
             await interaction.response.send_message(
                 f"Você entrou em **{sala['name']}**!\n"
