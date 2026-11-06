@@ -3129,8 +3129,12 @@ async def obter_forum_jogos(interaction):
         await interaction.channel.send(
             f"{dono.mention if dono else 'Dono do servidor'}, o DisChessLord precisa de um canal Fórum. Vou tentar criar **{NOME_FORUM_JOGOS}**."
         )
-    except (discord.Forbidden, discord.HTTPException):
-        pass
+    except (discord.Forbidden, discord.HTTPException, AttributeError):
+        try:
+            if dono:
+                await dono.send(aviso)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
     me = interaction.guild.me
     if me is None or not me.guild_permissions.manage_channels:
         await interaction.response.send_message(
@@ -3146,7 +3150,6 @@ async def obter_forum_jogos(interaction):
         )
         admin_data.setdefault("settings", {})["game_forum_id"] = forum.id
         salvar_admin()
-        await forum.send("♟️ Canal de mesas criado! Use /jogar para encontrar ou criar uma partida.")
         return forum
     except discord.Forbidden:
         await interaction.response.send_message(
