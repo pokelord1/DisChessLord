@@ -4476,7 +4476,7 @@ class JogadorEloModal(discord.ui.Modal):
         self.owner_id = owner_id
 
         self.user_id_input = discord.ui.TextInput(
-            label="Nome ou menção do jogador",
+            label="Nick global do jogador",
             placeholder="Nome exato ou @menção",
             max_length=100
         )
@@ -4501,10 +4501,10 @@ class JogadorEloModal(discord.ui.Modal):
             )
             return
 
-        membro, erro = buscar_membro_por_nome(interaction.guild, self.user_id_input.value)
+        jogador, erro = await buscar_jogador_global(self.user_id_input.value)
         try:
             if erro: raise ValueError
-            user_id = membro.id
+            user_id = jogador["id"]
             novo_elo = int(str(self.elo_input.value))
 
             if novo_elo < 0 or novo_elo > 1000000:
@@ -4544,7 +4544,7 @@ class JogadorEloModal(discord.ui.Modal):
                 return
 
         await interaction.response.send_message(
-            f"✅ ELO de **{membro.display_name}** alterado para **{novo_elo}**.",
+            f"✅ ELO de **{jogador['nick']}** alterado para **{novo_elo}**.",
             ephemeral=True
         )
 
@@ -4583,13 +4583,11 @@ class JogadorPatenteModal(discord.ui.Modal):
             )
             return
 
-        membro, erro = buscar_membro_por_nome(interaction.guild, self.user_id_input.value)
+        jogador, erro = await buscar_jogador_global(self.user_id_input.value)
         if erro:
-            await interaction.response.send_message(
-                erro,
-                ephemeral=True
-            )
+            await interaction.response.send_message(erro, ephemeral=True)
             return
+        user_id = jogador["id"]
 
         patente = str(self.patente_input.value).strip()
 
@@ -4666,15 +4664,11 @@ class JogadorTituloModal(discord.ui.Modal):
             )
             return
 
-        membro, erro = buscar_membro_por_nome(interaction.guild, self.user_id_input.value)
+        jogador, erro = await buscar_jogador_global(self.user_id_input.value)
         if erro:
-            await interaction.response.send_message(
-                erro,
-                ephemeral=True
-            )
+            await interaction.response.send_message(erro, ephemeral=True)
             return
-
-        user_id = membro.id
+        user_id = jogador["id"]
         dados = obter_dados_usuario(user_id)
         anterior = copiar_json(dados)
 
