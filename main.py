@@ -67,7 +67,8 @@ async def cmd_saldo(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-#  ============================================================ 
+
+# =========================================================== 
 # 1. CONFIGURAÇÃO
 # ============================================================
 
