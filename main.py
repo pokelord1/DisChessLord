@@ -3140,16 +3140,28 @@ async def obter_forum_jogos(interaction):
     if interaction.guild is None:
         await interaction.response.send_message("Use este comando em um servidor.", ephemeral=True)
         return None
+
+    guild = interaction.guild
     canal = interaction.channel
     if isinstance(canal, discord.ForumChannel):
         admin_data.setdefault("settings", {})["game_forum_id"] = canal.id
         salvar_admin()
         return canal
+
+    # Primeiro tenta o ID salvo; se o bot reiniciou ou o ID ficou inválido,
+    # procura o canal pelo nome antes de criar outro.
     forum_id = admin_data.setdefault("settings", {}).get("game_forum_id")
-    forum = interaction.guild.get_channel(int(forum_id)) if forum_id else None
+    forum = guild.get_channel(int(forum_id)) if forum_id else None
     if isinstance(forum, discord.ForumChannel):
         return forum
-    dono = interaction.guild.owner
+
+    forum = discord.utils.get(guild.channels, name=NOME_FORUM_JOGOS)
+    if isinstance(forum, discord.ForumChannel):
+        admin_data["settings"]["game_forum_id"] = forum.id
+        salvar_admin()
+        return forum
+
+    dono = guild.owner
     aviso = (
         f"{dono.mention if dono else 'Dono do servidor'}, o DisChessLord precisa de um canal Fórum. "
         f"Vou tentar criar **{NOME_FORUM_JOGOS}**."
@@ -3162,15 +3174,17 @@ async def obter_forum_jogos(interaction):
                 await dono.send(aviso)
         except (discord.Forbidden, discord.HTTPException):
             pass
-    me = interaction.guild.me
+
+    me = guild.me
     if me is None or not me.guild_permissions.manage_channels:
         await interaction.response.send_message(
             f"Não encontrei um Fórum e não posso criar canais. Peça ao dono para criar **{NOME_FORUM_JOGOS}** e dar ao bot a permissão Gerenciar canais.",
             ephemeral=True
         )
         return None
+
     try:
-        forum = await interaction.guild.create_forum(
+        forum = await guild.create_forum(
             name=NOME_FORUM_JOGOS,
             topic="Partidas públicas e privadas de xadrez do DisChessLord.",
             reason="Canal de mesas do DisChessLord"
@@ -3221,20 +3235,67 @@ async def iniciar_sala(interaction, sala_id):
         if jogador_ocupado(jogador) or jogador_ocupado(sala["owner"]):
             await interaction.response.send_message("Um dos jogadores já está em uma partida ou desafio.", ephemeral=True)
             return
-        thread = sala["thread"]
-        game = criar_partida(sala["owner"], jogador, thread.id, interaction.guild_id)
-        game["elo_enabled"] = bool(sala["elo"])
-        game["room_name"] = sala["name"]
-        active_games[thread.id] = game
-        SALAS_JOGO.pop(sala_id, None)
-        view = ChessBoardView(game)
-        message = sala.get("message")
-        if message is None:
-            message = await thread.send(embed=criar_embed_partida(game), view=view)
-        else:
-            await message.edit(content=f"♟️ **{sala['name']}** — partida iniciada!", embed=criar_embed_partida(game), view=view)
-        game["message"] = message
-        await interaction.response.send_message(f"Você entrou em **{sala['name']}**! A partida começou em {thread.mention}.", ephemeral=True)
+        forum = await obter_forum_jogos(interaction)
+        if forum is None:
+            return
+
+        # A publicação da sala serve para anunciar a vaga. Ao entrar o segundo
+        # jogador, cria uma discussão própria para a partida em andamento.
+        try:
+            created = await forum.create_thread(
+                name=sala["name"][:100],
+                content=(
+                    f"♟️ **{sala['name']}** — partida iniciada!\n"
+                    f"Brancas: <@{sala['owner']}>\n"
+                    f"Pretas: <@{jogador}>"
+                ),
+                embed=criar_embed_partida({
+                    "white": sala["owner"],
+                    "black": jogador,
+                    "board": chess.Board(),
+                    "elo_enabled": bool(sala["elo"])
+                })
+            )
+            partida_thread = getattr(created, "thread", None)
+            message = getattr(created, "message", None)
+            if partida_thread is None:
+                partida_thread = created[0]
+            if message is None:
+                message = created[1]
+
+            game = criar_partida(sala["owner"], jogador, partida_thread.id, interaction.guild_id)
+            game["elo_enabled"] = bool(sala["elo"])
+            game["room_name"] = sala["name"]
+            active_games[partida_thread.id] = game
+            SALAS_JOGO.pop(sala_id, None)
+
+            view = ChessBoardView(game)
+            await message.edit(
+                content=f"♟️ **{sala['name']}** — partida iniciada!",
+                embed=criar_embed_partida(game),
+                view=view
+            )
+            game["message"] = message
+
+            # Marca a publicação original como preenchida e remove o botão antigo.
+            sala_message = sala.get("message")
+            if sala_message is not None:
+                await sala_message.edit(
+                    content=f"♟️ **{sala['name']}** — partida em andamento: {partida_thread.mention}",
+                    embed=embed_sala(sala),
+                    view=None
+                )
+
+            await interaction.response.send_message(
+                f"Você entrou em **{sala['name']}**! A partida começou em {partida_thread.mention}.",
+                ephemeral=True
+            )
+        except (discord.Forbidden, discord.HTTPException, IndexError, TypeError):
+            logging.exception("Falha ao criar a discussão da partida.")
+            await interaction.response.send_message(
+                "Não consegui criar a discussão da partida no Fórum. Verifique minhas permissões e tente novamente.",
+                ephemeral=True
+            )
 
 
 class EntrarSalaView(discord.ui.View):
