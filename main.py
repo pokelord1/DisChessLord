@@ -612,16 +612,19 @@ class MissionAdminView(discord.ui.View):
     @discord.ui.button(label="Listar missões", emoji="📋", style=discord.ButtonStyle.secondary)
     async def listar(self, interaction, button):
         items = list(admin_data.setdefault("missions", {}).values())
-        embed = discord.Embed(title="Missões globais", color=discord.Color.blurple())
+        embed = discord.Embed(title="🎯 Missões globais", color=discord.Color.blurple())
         if not items:
             embed.description = "Nenhuma missão criada."
         else:
-            linhas = []
             for m in items[:20]:
-                tipo = "Especial · admins · tickets" if m.get("kind") == "special" else "Normal · todos · ChessCoins"
+                tipo = "Especial · administradores · tickets" if m.get("kind") == "special" else "Normal · todos os jogadores · ChessCoins"
                 objetivo = MISSION_OBJECTIVES.get(m.get("objective"), ("Objetivo desconhecido", ""))[0]
-                linhas.append(f"**{m.get('name')}** — {tipo}\\n{objetivo}: {m.get('target')} · Recompensa: {m.get('reward')}")
-            embed.description = "\\n\\n".join(linhas)
+                status = "🟢 Ativa" if m.get("active", True) else "⚫ Inativa"
+                embed.add_field(
+                    name=str(m.get("name") or "Missão")[:256],
+                    value=f"{tipo}\\n{status}\\n**Objetivo:** {objetivo}: {int(m.get('target', 1))}\\n**Recompensa:** {int(m.get('reward', 0)):,} {'tickets' if m.get('kind') == 'special' else 'ChessCoins'}",
+                    inline=False
+                )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -1011,6 +1014,48 @@ async def conquistas(interaction):
     if resumo:
         embed.add_field(name="🎉 Novas conquistas", value=resumo[:1024], inline=False)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+def criar_embed_missoes_jogador(user_id, guild):
+    dados = obter_dados_usuario(user_id)
+    progresso = dados.get("mission_progress", {})
+    concluidas = set(dados.get("mission_claimed", []))
+    permissoes = getattr(getattr(guild, "get_member", lambda _: None)(user_id), "guild_permissions", None) if guild else None
+    eh_admin = bool(permissoes and (permissoes.administrator or permissoes.manage_guild or permissoes.moderate_members))
+
+    embed = discord.Embed(
+        title="🎯 Suas missões",
+        description="Complete os objetivos jogando partidas. As recompensas são entregues automaticamente.",
+        color=discord.Color.gold()
+    )
+    visiveis = [
+        (mid, m) for mid, m in admin_data.setdefault("missions", {}).items()
+        if m.get("active", True) and (m.get("kind") != "special" or eh_admin)
+    ]
+    if not visiveis:
+        embed.description += "\\n\\nNão há missões disponíveis para você no momento."
+        return embed
+
+    for mid, missao in visiveis[:20]:
+        alvo = max(1, int(missao.get("target", 1)))
+        atual = min(alvo, max(0, int(progresso.get(mid, 0))))
+        objetivo = MISSION_OBJECTIVES.get(missao.get("objective"), ("Objetivo", ""))[0]
+        recompensa = int(missao.get("reward", 0))
+        moeda = "tickets" if missao.get("kind") == "special" else "ChessCoins"
+        status = "✅ Concluída — recompensa entregue" if mid in concluidas else f"📊 Progresso: **{atual}/{alvo}**"
+        embed.add_field(
+            name=str(missao.get("name") or "Missão")[:256],
+            value=f"**Objetivo:** {objetivo}\\n{status}\\n**Recompensa:** {recompensa:,} {moeda}",
+            inline=False
+        )
+    embed.set_footer(text="Missões especiais aparecem somente para administradores do servidor.")
+    return embed
+
+
+@bot.tree.command(name="missoes", description="Veja suas missões, progresso e recompensas.")
+async def missoes(interaction: discord.Interaction):
+    embed = criar_embed_missoes_jogador(interaction.user.id, interaction.guild)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 @bot.tree.command(name="saldo", description="Veja seu saldo de ChessCoins.")
 async def cmd_saldo(interaction: discord.Interaction):
