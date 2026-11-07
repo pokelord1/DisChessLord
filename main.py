@@ -3758,6 +3758,24 @@ class CriarSalaModal(discord.ui.Modal, title="Criar mesa de xadrez"):
             await interaction.response.send_message("Não consegui criar a mesa. Tente novamente.", ephemeral=True)
 
 
+class EntrarMesaPrivadaModal(discord.ui.Modal, title="Entrar em mesa privada"):
+    nome = discord.ui.TextInput(label="Nome exato da mesa", max_length=80)
+    senha = discord.ui.TextInput(label="Senha da mesa", max_length=50)
+
+    async def on_submit(self, interaction):
+        if not await exigir_nick(interaction):
+            return
+        nome = str(self.nome.value).strip()
+        senha = str(self.senha.value).strip()
+        sala = next((x for x in SALAS_JOGO.values()
+                     if sala_aberta(x) and x.get("private")
+                     and str(x.get("name", "")).casefold() == nome.casefold()), None)
+        if sala is None or not secrets.compare_digest(str(sala.get("password") or ""), senha):
+            await interaction.response.send_message("Mesa privada não encontrada ou senha incorreta.", ephemeral=True)
+            return
+        await iniciar_sala(interaction, sala["id"])
+
+
 class CancelarSalaModal(discord.ui.Modal, title="Cancelar partida criada"):
     nome = discord.ui.TextInput(
         label="Nome exato da partida",
@@ -3912,10 +3930,11 @@ class RevancheView(discord.ui.View):
     app_commands.Choice(name="Partidas disponíveis", value="partidas"),
     app_commands.Choice(name="Criar uma partida", value="criar"),
     app_commands.Choice(name="Entrar em partida privada", value="entrar"),
+    app_commands.Choice(name="Torneios", value="torneios"),
     app_commands.Choice(name="Cancelar uma partida criada", value="cancelar")
 ])
-@app_commands.describe(acao="Deixe vazio para entrar em uma partida pública aleatória.", nome="Nome exato da mesa privada.", senha="Senha da mesa privada.")
-async def jogar(interaction, acao: str = None, nome: str = None, senha: str = None):
+@app_commands.describe(acao="Escolha uma ação. Deixe vazio para entrar em uma partida pública aleatória.")
+async def jogar(interaction, acao: str = None):
     if not await exigir_nick(interaction):
         return
     if jogador_ocupado(interaction.user.id):
@@ -3932,6 +3951,18 @@ async def jogar(interaction, acao: str = None, nome: str = None, senha: str = No
             )
             return
         await interaction.response.send_modal(CriarSalaModal())
+        return
+    if acao == "entrar":
+        await interaction.response.send_modal(EntrarMesaPrivadaModal())
+        return
+    if acao == "torneios":
+        torneios_ativos = [t for t in torneios_do_servidor(interaction.guild_id)
+                           if t.get("status") in ("inscricoes", "em_andamento")]
+        if not torneios_ativos:
+            await interaction.response.send_message("Não há torneios disponíveis neste servidor.", ephemeral=True)
+            return
+        view = ListaTorneiosJogarView(torneios_ativos, interaction.user.id)
+        await interaction.response.send_message(embed=view.criar_embed(), view=view, ephemeral=True)
         return
     if sala_pendente_do_jogador(interaction.user.id):
         await interaction.response.send_message(
@@ -5375,6 +5406,8 @@ class PainelSorteiosView(discord.ui.View):
 
 async def atualizar_paineis_sorteios(guild_id):
     if guild_id is None:
+        for gid in list(admin_data.setdefault("settings", {}).setdefault("raffle_panels", {})):
+            await atualizar_paineis_sorteios(int(gid))
         return
     registro = admin_data.setdefault("settings", {}).setdefault("raffle_panels", {}).get(str(guild_id))
     if not isinstance(registro, dict):
