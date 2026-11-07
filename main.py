@@ -5895,15 +5895,12 @@ class DashboardView(discord.ui.View):
 
         if self.tab == "server":
             botoes = [
-                ("Eventos locais", "🎉", self.abrir_eventos),
-                ("Torneios locais", "🏆", self.abrir_torneios),
-                ("Sorteios locais", "🎟️", self.abrir_sorteios),
+                ("Atividade local", "📋", self.abrir_atividade_local),
             ]
         else:
             botoes = [
                 ("Jogadores", "👥", self.abrir_jogadores),
                 ("Atividades globais", "🌐", self.abrir_atividades_globais),
-                ("Atividade do servidor", "📋", self.abrir_atividade_local),
                 ("Peças", "♟️", self.abrir_pecas),
                 ("Missões globais", "🎯", self.abrir_missoes),
                 ("Estatísticas", "📊", self.abrir_estatisticas),
