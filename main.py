@@ -5400,7 +5400,7 @@ class GerenciarSorteioModal(discord.ui.Modal):
             return
         rid, r = encontrados[0]
         if self.acao=="consultar":
-            await i.response.send_message(embed=discord.Embed(title=r.get("name","Sorteio"),description=f"Status: {r.get('status')}\\nPrêmio: {r.get('prize')}"),ephemeral=True);return
+            await i.response.send_message(embed=discord.Embed(title=r.get("name","Sorteio"),description=f"Status: {r.get('status')}\nPrêmio: {r.get('prize')}"),ephemeral=True);return
         old=copiar_json(r)
         if self.acao=="iniciar":
             await enviar_selecao_pagamento(i, r, "sorteio")
@@ -5595,7 +5595,7 @@ def criar_embed_painel_sorteios(guild_id):
     for _, raffle in abertos[:10]:
         embed.add_field(
             name=str(raffle.get("name", "Sorteio"))[:256],
-            value=f"Prêmio: **{raffle.get('prize', 'Não informado')}**\\n"
+            value=f"Prêmio: **{raffle.get('prize', 'Não informado')}**\n"
                   f"Participantes: **{len(raffle.get('entries', {}))}**",
             inline=False
         )
@@ -5670,10 +5670,10 @@ async def atualizar_paineis_sorteios(guild_id):
         logging.exception("Não foi possível atualizar o painel permanente de sorteios do servidor %s.", guild_id)
 
 
-@bot.tree.command(name="serv_sorteios", description="Publica ou atualiza o painel permanente de sorteios.")
+@bot.tree.command(name="msg_sorteios", description="Publica ou atualiza o painel permanente de sorteios.")
 @app_commands.guild_only()
 @app_commands.checks.has_permissions(administrator=True)
-async def serv_sorteios(interaction):
+async def msg_sorteios(interaction):
     if interaction.guild is None or not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Somente administradores do servidor podem usar este comando.", ephemeral=True)
         return
@@ -5700,11 +5700,23 @@ async def serv_sorteios(interaction):
             acao = "Painel permanente criado. Não precisará executar este comando novamente."
     except discord.NotFound:
         mensagem = await interaction.channel.send(embed=embed, view=view)
+        anterior = paineis.get(str(interaction.guild_id))
         paineis[str(interaction.guild_id)] = {"channel_id": interaction.channel_id, "message_id": mensagem.id}
-        salvar_admin()
+        if not salvar_admin():
+            if anterior is None:
+                paineis.pop(str(interaction.guild_id), None)
+            else:
+                paineis[str(interaction.guild_id)] = anterior
+            await mensagem.delete()
+            await interaction.followup.send("Não consegui salvar o registro do painel. A mensagem nova foi removida; tente novamente.", ephemeral=True)
+            return
         acao = "O painel anterior não existia mais; criei outro."
     except discord.Forbidden:
-        await interaction.followup.send("Preciso de permissão para enviar e editar mensagens neste canal.", ephemeral=True)
+        await interaction.followup.send("Preciso das permissões Ver canal, Enviar mensagens, Inserir links e Ler histórico de mensagens neste canal.", ephemeral=True)
+        return
+    except discord.HTTPException:
+        logging.exception("Falha ao publicar ou atualizar o painel de sorteios no servidor %s.", interaction.guild_id)
+        await interaction.followup.send("O Discord não permitiu publicar ou atualizar o painel. Confira as permissões e tente novamente.", ephemeral=True)
         return
     await interaction.followup.send(acao, ephemeral=True)
 
