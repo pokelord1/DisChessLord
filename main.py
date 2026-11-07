@@ -1065,8 +1065,12 @@ def nome_jogador(user_id, guild=None):
             nome = (usuario.global_name or usuario.name) if usuario else "Jogador sem nick"
         if autorizado_dev(user_id):
             nome = f"☑️ {nome}"
-    titulo = str(dados.get("titulo") or "").strip()
-    return f"{nome} · ✨ {titulo}" if titulo else nome
+    titulos = dados.get("titulos")
+    if not isinstance(titulos, list):
+        legado = str(dados.get("titulo") or "").strip()
+        titulos = [legado] if legado else []
+    titulos = [str(t).strip() for t in titulos if str(t).strip()][:2]
+    return f"{nome} · ✨ {' · '.join(titulos)}" if titulos else nome
 
 
 def nickname_tem_identidade_reservada(nickname):
@@ -4062,10 +4066,15 @@ async def perfil(
         inline=False
     )
 
-    if dados.get("titulo"):
+    titulos = dados.get("titulos")
+    if not isinstance(titulos, list):
+        legado = str(dados.get("titulo") or "").strip()
+        titulos = [legado] if legado else []
+    titulos = [str(t).strip() for t in titulos if str(t).strip()][:2]
+    if titulos:
         embed.add_field(
-            name="✨ Título",
-            value=dados["titulo"],
+            name="✨ Títulos",
+            value=" · ".join(titulos),
             inline=False
         )
 
@@ -4628,6 +4637,42 @@ async def resetar(
 
 
 # ============================================================
+# TÍTULO ADM
+# ============================================================
+
+@bot.tree.command(name="adm_title", description="Ativa ou remove o título ADM do seu perfil.")
+@app_commands.guild_only()
+@app_commands.choices(acao=[
+    app_commands.Choice(name="Sim, colocar", value="sim"),
+    app_commands.Choice(name="Não, remover", value="nao")
+])
+async def adm_title(interaction, acao: app_commands.Choice[str]):
+    if not autorizado_adm(interaction):
+        await interaction.response.send_message("Somente administradores/moderadores podem usar este comando.", ephemeral=True)
+        return
+    dados = obter_dados_usuario(interaction.user.id)
+    titulos = dados.get("titulos")
+    if not isinstance(titulos, list):
+        legado = str(dados.get("titulo") or "").strip()
+        titulos = [legado] if legado else []
+    titulos = [str(t).strip() for t in titulos if str(t).strip() and str(t).strip().casefold() != "adm"]
+    if acao.value == "sim":
+        if len(titulos) >= 2:
+            await interaction.response.send_message("Você já tem 2 títulos. Remova um antes de adicionar o título ADM.", ephemeral=True)
+            return
+        titulos.append("ADM")
+        mensagem = "✨ O título **ADM** foi adicionado ao seu perfil."
+    else:
+        mensagem = "O título **ADM** foi removido do seu perfil."
+    dados["titulos"] = titulos
+    dados["titulo"] = None
+    if not salvar_dados():
+        await interaction.response.send_message("Não foi possível salvar a alteração.", ephemeral=True)
+        return
+    await interaction.response.send_message(mensagem, ephemeral=True)
+
+
+# ============================================================
 # DASHBOARDS DE MODERAÇÃO E SORTEIOS
 # ============================================================
 
@@ -4898,18 +4943,7 @@ class TicketsModal(discord.ui.Modal):
         if erro_jogador:
             await interaction.response.send_message(erro_jogador, ephemeral=True)
             return
-        member = interaction.guild.get_member(int(jogador["id"]))
-        if member is None:
-            await interaction.response.send_message("Esse nick pertence a alguém que não está neste servidor.", ephemeral=True)
-            return
-        uid = member.id
-        if not autorizado_adm(interaction) or not (
-            member.guild_permissions.administrator
-            or member.guild_permissions.manage_guild
-            or member.guild_permissions.moderate_members
-        ):
-            await interaction.response.send_message("Tickets administrativos só podem ser entregues a membros da equipe de moderação/administração.", ephemeral=True)
-            return
+        uid = int(jogador["id"])
         dados = obter_dados_usuario(uid)
         anterior = int(dados.get("command_tickets", 0))
         dados["command_tickets"] = anterior + qtd
@@ -4917,7 +4951,7 @@ class TicketsModal(discord.ui.Modal):
             dados["command_tickets"] = anterior
             await interaction.response.send_message("Falha ao salvar; saldo restaurado.", ephemeral=True)
             return
-        await interaction.response.send_message(f"✅ {qtd} ticket(s) administrativos entregues a {member.mention}. Saldo: **{anterior + qtd}**.", ephemeral=True)
+        await interaction.response.send_message(f"✅ {qtd} ticket(s) administrativos entregues ao jogador {uid}. Saldo: **{anterior + qtd}**.", ephemeral=True)
 
 
 class DevRafflesView(discord.ui.View):
@@ -5694,7 +5728,7 @@ class JogadorTituloModal(discord.ui.Modal):
         )
 
         self.titulo_input = discord.ui.TextInput(
-            label="Título (vazio para remover)",
+            label="Títulos (separe até 2 com |; vazio remove)",
             required=False,
             max_length=60
         )
@@ -5721,11 +5755,13 @@ class JogadorTituloModal(discord.ui.Modal):
         dados = obter_dados_usuario(user_id)
         anterior = copiar_json(dados)
 
-        titulo = str(
-            self.titulo_input.value
-        ).strip()
-
-        dados["titulo"] = titulo or None
+        texto_titulos = str(self.titulo_input.value).strip()
+        titulos = [t.strip() for t in texto_titulos.split("|") if t.strip()]
+        if len(titulos) > 2:
+            await interaction.response.send_message("Cada jogador pode ter no máximo 2 títulos. Separe os títulos com |.", ephemeral=True)
+            return
+        dados["titulos"] = titulos
+        dados["titulo"] = None
 
         if not salvar_dados():
             user_data[str(user_id)] = anterior
