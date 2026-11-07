@@ -2140,6 +2140,46 @@ def finalizar_partida(game, resultado, motivo):
                 sincronizar_patentes_membros(guild, [white, black])
             )
 
+    tournament_id = game.get("tournament_id")
+    if tournament_id:
+        torneio = admin_data.setdefault("tournaments", {}).get(str(tournament_id))
+        if torneio:
+            pareamento = torneio.setdefault("active_matches", {}).pop(str(game["channel_id"]), None)
+            jogadores_torneio = [str(x) for x in (pareamento or game.get("tournament_players", []))]
+            if resultado in ("1-0", "0-1") and len(jogadores_torneio) == 2:
+                vencedor = str(white if resultado == "1-0" else black)
+                eliminado = str(black if resultado == "1-0" else white)
+                vivos = [str(x) for x in torneio.get("alive_participants", torneio.get("participants", []))]
+                if eliminado in vivos:
+                    vivos.remove(eliminado)
+                torneio["alive_participants"] = vivos
+                eliminados = torneio.setdefault("eliminated", [])
+                if eliminado not in [str(x) for x in eliminados]:
+                    eliminados.append(eliminado)
+                torneio.setdefault("matches", []).append({
+                    "channel_id": str(game["channel_id"]),
+                    "players": jogadores_torneio,
+                    "winner": vencedor,
+                    "eliminated": eliminado,
+                    "result": resultado,
+                    "date": data_iso()
+                })
+                if len(vivos) == 1:
+                    torneio["status"] = "encerrado"
+                    torneio["winner"] = vivos[0]
+                    torneio["ended_at"] = data_iso()
+            elif len(jogadores_torneio) == 2:
+                # Empate: ambos continuam vivos e podem buscar outro adversário.
+                torneio.setdefault("matches", []).append({
+                    "channel_id": str(game["channel_id"]),
+                    "players": jogadores_torneio,
+                    "winner": None,
+                    "result": resultado,
+                    "date": data_iso()
+                })
+            if not salvar_admin():
+                logging.error("Não foi possível salvar o resultado do torneio %s.", tournament_id)
+
     active_games.pop(
         game["channel_id"],
         None
