@@ -1547,6 +1547,98 @@ def torneios_do_servidor(guild_id):
     ]
 
 
+def numero_rodadas_suico(total_jogadores):
+    if total_jogadores < 2:
+        return 0
+    return max(1, math.ceil(math.log2(total_jogadores)))
+
+
+def preparar_rodada_suica(torneio):
+    participantes = [str(x) for x in torneio.get("participants", [])]
+    pontuacoes = torneio.setdefault("scores", {uid: 0.0 for uid in participantes})
+    historico = torneio.setdefault("opponents", {uid: [] for uid in participantes})
+    byes = torneio.setdefault("byes", [])
+    rodada_num = int(torneio.get("round", 0)) + 1
+    total_rodadas = int(torneio.get("total_rounds", numero_rodadas_suico(len(participantes))))
+    if rodada_num > total_rodadas:
+        torneio["status"] = "encerrado"
+        torneio["ended_at"] = data_iso()
+        ranking = sorted(participantes, key=lambda uid: (-float(pontuacoes.get(uid, 0)), uid))
+        torneio["winner"] = ranking[0] if ranking else None
+        return
+
+    restantes = sorted(
+        participantes,
+        key=lambda uid: (-float(pontuacoes.get(uid, 0)), secrets.randbelow(1000000))
+    )
+    pareamentos = []
+    if len(restantes) % 2:
+        candidatos = [uid for uid in restantes if uid not in byes] or list(restantes)
+        bye = min(candidatos, key=lambda uid: (float(pontuacoes.get(uid, 0)), secrets.randbelow(1000000)))
+        restantes.remove(bye)
+        byes.append(bye)
+        pontuacoes[bye] = float(pontuacoes.get(bye, 0)) + 1.0
+        pareamentos.append({"players": [bye], "status": "bye", "result": "bye"})
+
+    while restantes:
+        jogador = restantes.pop(0)
+        indice = next(
+            (i for i, adversario in enumerate(restantes)
+             if adversario not in historico.setdefault(jogador, [])
+             and jogador not in historico.setdefault(adversario, [])),
+            0
+        )
+        adversario = restantes.pop(indice)
+        pareamentos.append({
+            "players": [jogador, adversario],
+            "status": "aguardando",
+            "result": None,
+            "channel_id": None
+        })
+
+    torneio["round"] = rodada_num
+    torneio["rounds"] = torneio.setdefault("rounds", [])
+    torneio["rounds"].append({"number": rodada_num, "pairings": pareamentos, "created_at": data_iso()})
+    torneio["current_pairings"] = pareamentos
+    torneio["active_matches"] = {}
+    if not any(p["status"] == "aguardando" for p in pareamentos):
+        preparar_rodada_suica(torneio)
+
+
+def registrar_resultado_suico(torneio, game, resultado):
+    jogadores = [str(x) for x in game.get("tournament_players", [])]
+    if len(jogadores) != 2:
+        return
+    canal_id = str(game.get("channel_id"))
+    pareamento = next(
+        (p for p in torneio.get("current_pairings", [])
+         if [str(x) for x in p.get("players", [])] == jogadores
+         or [str(x) for x in p.get("players", [])] == jogadores[::-1]),
+        None
+    )
+    if not pareamento or pareamento.get("status") != "em_andamento":
+        return
+    brancas, pretas = str(game["white"]), str(game["black"])
+    pontuacoes = torneio.setdefault("scores", {})
+    if resultado == "1-0":
+        pontuacoes[brancas] = float(pontuacoes.get(brancas, 0)) + 1.0
+    elif resultado == "0-1":
+        pontuacoes[pretas] = float(pontuacoes.get(pretas, 0)) + 1.0
+    else:
+        pontuacoes[brancas] = float(pontuacoes.get(brancas, 0)) + 0.5
+        pontuacoes[pretas] = float(pontuacoes.get(pretas, 0)) + 0.5
+    torneio.setdefault("opponents", {}).setdefault(brancas, []).append(pretas)
+    torneio.setdefault("opponents", {}).setdefault(pretas, []).append(brancas)
+    pareamento.update(status="concluida", result=resultado, finished_at=data_iso(), channel_id=canal_id)
+    torneio.setdefault("active_matches", {}).pop(canal_id, None)
+    torneio.setdefault("matches", []).append({
+        "channel_id": canal_id, "players": jogadores, "result": resultado,
+        "round": torneio.get("round"), "date": data_iso()
+    })
+    if all(p.get("status") in ("concluida", "bye") for p in torneio.get("current_pairings", [])):
+        preparar_rodada_suica(torneio)
+
+
 def criar_dados_torneio(
     guild_id,
     criador_id,
@@ -2146,37 +2238,7 @@ def finalizar_partida(game, resultado, motivo):
         if torneio:
             pareamento = torneio.setdefault("active_matches", {}).pop(str(game["channel_id"]), None)
             jogadores_torneio = [str(x) for x in (pareamento or game.get("tournament_players", []))]
-            if resultado in ("1-0", "0-1") and len(jogadores_torneio) == 2:
-                vencedor = str(white if resultado == "1-0" else black)
-                eliminado = str(black if resultado == "1-0" else white)
-                vivos = [str(x) for x in torneio.get("alive_participants", torneio.get("participants", []))]
-                if eliminado in vivos:
-                    vivos.remove(eliminado)
-                torneio["alive_participants"] = vivos
-                eliminados = torneio.setdefault("eliminated", [])
-                if eliminado not in [str(x) for x in eliminados]:
-                    eliminados.append(eliminado)
-                torneio.setdefault("matches", []).append({
-                    "channel_id": str(game["channel_id"]),
-                    "players": jogadores_torneio,
-                    "winner": vencedor,
-                    "eliminated": eliminado,
-                    "result": resultado,
-                    "date": data_iso()
-                })
-                if len(vivos) == 1:
-                    torneio["status"] = "encerrado"
-                    torneio["winner"] = vivos[0]
-                    torneio["ended_at"] = data_iso()
-            elif len(jogadores_torneio) == 2:
-                # Empate: ambos continuam vivos e podem buscar outro adversário.
-                torneio.setdefault("matches", []).append({
-                    "channel_id": str(game["channel_id"]),
-                    "players": jogadores_torneio,
-                    "winner": None,
-                    "result": resultado,
-                    "date": data_iso()
-                })
+            registrar_resultado_suico(torneio, game, resultado)
             if not salvar_admin():
                 logging.error("Não foi possível salvar o resultado do torneio %s.", tournament_id)
 
@@ -3970,18 +4032,12 @@ class ListaTorneiosJogarView(discord.ui.View):
         super().__init__(timeout=300)
         self.torneios = {str(t["id"]): t for t in torneios}
         self.owner_id = owner_id
-        opcoes = [
-            discord.SelectOption(
-                label=str(t.get("name", "Torneio"))[:100],
-                description=f"{len(t.get('participants', []))} inscritos • {t.get('status', 'status')}"[:100],
-                value=str(t["id"])
-            )
-            for t in torneios[:25]
-        ]
-        self.seletor = discord.ui.Select(
-            placeholder="Escolha um torneio",
-            min_values=1, max_values=1, options=opcoes
-        )
+        opcoes = [discord.SelectOption(
+            label=str(t.get("name", "Torneio"))[:100],
+            description=f"{len(t.get('participants', []))} inscritos • {t.get('status', 'status')}"[:100],
+            value=str(t["id"])
+        ) for t in torneios[:25]]
+        self.seletor = discord.ui.Select(placeholder="Escolha um torneio", min_values=1, max_values=1, options=opcoes)
         self.seletor.callback = self.selecionar
         self.add_item(self.seletor)
 
@@ -3992,41 +4048,40 @@ class ListaTorneiosJogarView(discord.ui.View):
         return True
 
     def torneio_selecionado(self):
-        if not self.seletor.values:
-            return None
-        return admin_data.get("tournaments", {}).get(self.seletor.values[0])
+        return admin_data.get("tournaments", {}).get(self.seletor.values[0]) if self.seletor.values else None
 
     def criar_embed(self):
         linhas = []
-        for tid, t in self.torneios.items():
-            vivos = t.get("alive_participants") or t.get("participants", [])
-            eliminados = t.get("eliminated", [])
+        for torneio in self.torneios.values():
+            scores = torneio.get("scores", {})
+            ranking = sorted(torneio.get("participants", []), key=lambda uid: -float(scores.get(str(uid), 0)))
             linhas.append(
-                f"**{t.get('name', 'Torneio')}** — {t.get('status')}\n"
-                f"Participantes: **{len(t.get('participants', []))}** • "
-                f"Não eliminados: **{len(vivos)}** • Eliminados: **{len(eliminados)}**"
+                f"**{torneio.get('name', 'Torneio')}** — {torneio.get('status')}\n"
+                f"Inscritos: **{len(ranking)}** • Rodada: **{torneio.get('round', 0)}/{torneio.get('total_rounds', '—')}**"
             )
-        return discord.Embed(
-            title="🏆 Torneios disponíveis",
-            description="\n\n".join(linhas) or "Nenhum torneio disponível.",
-            color=discord.Color.gold()
-        )
+        return discord.Embed(title="🏆 Torneios suíços", description="\n\n".join(linhas) or "Nenhum torneio disponível.", color=discord.Color.gold())
 
     async def selecionar(self, interaction):
         torneio = self.torneio_selecionado()
         if not torneio:
             await interaction.response.send_message("Torneio não encontrado.", ephemeral=True)
             return
-        vivos = torneio.get("alive_participants") or torneio.get("participants", [])
-        eliminados = torneio.get("eliminated", [])
-        inscritos = torneio.get("participants", [])
-        nomes_vivos = [nome_jogador(uid, interaction.guild) for uid in vivos[:15]]
-        nomes_eliminados = [nome_jogador(uid, interaction.guild) for uid in eliminados[:15]]
-        embed = discord.Embed(title=f"🏆 {torneio.get('name')}", color=discord.Color.gold())
-        embed.add_field(name="Status", value=torneio.get("status", "desconhecido"), inline=False)
-        embed.add_field(name=f"Não eliminados ({len(vivos)})", value="\n".join(nomes_vivos) or "Nenhum", inline=False)
-        embed.add_field(name=f"Eliminados ({len(eliminados)})", value="\n".join(nomes_eliminados) or "Nenhum", inline=False)
-        embed.set_footer(text=f"Inscritos: {len(inscritos)} • Use /inscrever_torneio enquanto as inscrições estiverem abertas.")
+        scores = torneio.get("scores", {})
+        participantes = [str(x) for x in torneio.get("participants", [])]
+        ranking = sorted(participantes, key=lambda uid: (-float(scores.get(uid, 0)), uid))
+        linhas = [f"**{i+1}.** {nome_jogador(uid, interaction.guild)} — **{float(scores.get(uid, 0)):g} pts**" for i, uid in enumerate(ranking[:25])]
+        embed = discord.Embed(title=f"🏆 {torneio.get('name')}", description=f"**Status:** {torneio.get('status')}\n**Rodada:** {torneio.get('round', 0)}/{torneio.get('total_rounds', '—')}\n\n" + ("\n".join(linhas) or "Ainda sem participantes."), color=discord.Color.gold())
+        pareamentos = torneio.get("current_pairings", [])
+        jogos = []
+        for par in pareamentos:
+            jogadores = par.get("players", [])
+            if par.get("status") == "bye":
+                jogos.append(f"🎟️ {nome_jogador(jogadores[0], interaction.guild)} — bye (+1 ponto)")
+            elif len(jogadores) == 2:
+                jogos.append(f"{'✅' if par.get('status') == 'concluida' else '♟️'} {nome_jogador(jogadores[0], interaction.guild)} × {nome_jogador(jogadores[1], interaction.guild)}")
+        if jogos:
+            embed.add_field(name="Pareamentos da rodada", value="\n".join(jogos)[:1024], inline=False)
+        embed.set_footer(text="Use /inscrever_torneio durante as inscrições. O botão Jogar abre seu confronto da rodada.")
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Jogar", emoji="♟️", style=discord.ButtonStyle.success, row=1)
@@ -4034,73 +4089,63 @@ class ListaTorneiosJogarView(discord.ui.View):
         if not await exigir_nick(interaction):
             return
         torneio = self.torneio_selecionado()
-        if not torneio:
-            await interaction.response.send_message("Selecione um torneio primeiro.", ephemeral=True)
-            return
-        if torneio.get("status") not in ("em_andamento", "inscricoes"):
-            await interaction.response.send_message("Este torneio ainda não está em andamento.", ephemeral=True)
-            return
-        if torneio.get("format") != "eliminacao":
-            await interaction.response.send_message("O pareamento automático com eliminação está disponível no formato eliminacao. Este torneio usa outro formato.", ephemeral=True)
+        if not torneio or torneio.get("status") != "em_andamento":
+            await interaction.response.send_message("Este torneio não está em andamento.", ephemeral=True)
             return
         uid = str(interaction.user.id)
-        inscritos = [str(x) for x in torneio.get("participants", [])]
-        vivos = [str(x) for x in (torneio.get("alive_participants") or inscritos)]
-        eliminados = [str(x) for x in torneio.get("eliminated", [])]
-        if uid not in inscritos or uid not in vivos or uid in eliminados:
-            await interaction.response.send_message("Você não está inscrito ou já foi eliminado deste torneio.", ephemeral=True)
+        if uid not in [str(x) for x in torneio.get("participants", [])]:
+            await interaction.response.send_message("Você não está inscrito neste torneio.", ephemeral=True)
             return
-        partidas_ativas = torneio.setdefault("active_matches", {})
-        if any(uid in [str(x) for x in par] for par in partidas_ativas.values()):
-            await interaction.response.send_message("Você já tem uma partida em andamento neste torneio.", ephemeral=True)
+        pareamento = next((p for p in torneio.get("current_pairings", []) if uid in [str(x) for x in p.get("players", [])]), None)
+        if not pareamento:
+            await interaction.response.send_message("Você não possui pareamento nesta rodada.", ephemeral=True)
             return
-        adversarios = [
-            x for x in vivos if x != uid
-            and not any(x in [str(y) for y in par] for par in partidas_ativas.values())
-            and usuario_tem_nick(x)
-            and not jogador_ocupado(int(x))
-        ]
-        if not adversarios:
-            await interaction.response.send_message("Não há outro participante disponível para jogar agora.", ephemeral=True)
+        if pareamento.get("status") == "bye":
+            await interaction.response.send_message("Você recebeu um bye nesta rodada e ganhou 1 ponto automaticamente.", ephemeral=True)
             return
-        if jogador_ocupado(interaction.user.id):
-            await interaction.response.send_message("Você já está em outra partida.", ephemeral=True)
+        if pareamento.get("status") == "concluida":
+            await interaction.response.send_message("Seu confronto desta rodada já foi concluído. Aguarde a próxima rodada.", ephemeral=True)
             return
-        oponente = secrets.choice(adversarios)
+        if pareamento.get("status") == "em_andamento":
+            await interaction.response.send_message("Seu confronto já foi iniciado. Entre na publicação da partida para continuar.", ephemeral=True)
+            return
+        jogadores = [str(x) for x in pareamento.get("players", [])]
+        if uid not in jogadores or len(jogadores) != 2:
+            await interaction.response.send_message("Pareamento inválido.", ephemeral=True)
+            return
+        oponente = jogadores[0] if jogadores[1] == uid else jogadores[1]
+        if not usuario_tem_nick(oponente):
+            await interaction.response.send_message("Seu adversário ainda não definiu um nick e não pode iniciar a partida.", ephemeral=True)
+            return
+        if jogador_ocupado(interaction.user.id) or jogador_ocupado(int(oponente)):
+            await interaction.response.send_message("Você ou seu adversário já está em outra partida. Tente novamente quando estiver livre.", ephemeral=True)
+            return
         forum = await obter_forum_jogos(interaction)
         if forum is None:
             return
-        nome_partida = f"{torneio.get('name', 'Torneio')} — {nome_jogador(uid)} x {nome_jogador(oponente)}"
+        nome_partida = f"{torneio.get('name', 'Torneio')} R{torneio.get('round')} — {nome_jogador(uid)} x {nome_jogador(oponente)}"
         try:
-            created = await forum.create_thread(
-                name=nome_partida[:100],
-                content=f"🏆 **Partida de torneio: {torneio.get('name')}**\n<@{uid}> x <@{oponente}>"
-            )
+            created = await forum.create_thread(name=nome_partida[:100], content=f"🏆 **{torneio.get('name')} — Rodada {torneio.get('round')}**\n<@{uid}> x <@{oponente}>")
             thread = getattr(created, "thread", None) or created[0]
             message = getattr(created, "message", None) or created[1]
         except (discord.Forbidden, discord.HTTPException):
-            logging.exception("Falha ao criar partida de torneio.")
+            logging.exception("Falha ao criar partida de torneio suíço.")
             await interaction.response.send_message("Não consegui criar a mesa do torneio. Verifique as permissões do Fórum.", ephemeral=True)
             return
         sid = gerar_id()
-        SALAS_JOGO[sid] = {
-            "id": sid, "name": nome_partida, "owner": int(oponente),
-            "owner_name": nome_jogador(oponente), "guild_id": interaction.guild_id,
-            "private": False, "password": None, "elo": False,
-            "status": "aguardando", "thread": thread, "message": message
-        }
+        SALAS_JOGO[sid] = {"id": sid, "name": nome_partida, "owner": int(oponente), "owner_name": nome_jogador(oponente), "guild_id": interaction.guild_id, "private": False, "password": None, "elo": False, "status": "aguardando", "thread": thread, "message": message}
         await iniciar_sala(interaction, sid)
-        game = next((g for g in active_games.values()
-                     if g.get("room_name") == nome_partida
-                     and {str(g.get("white")), str(g.get("black"))} == {uid, oponente}), None)
+        game = next((g for g in active_games.values() if g.get("room_name") == nome_partida and {str(g.get("white")), str(g.get("black"))} == {uid, oponente}), None)
         if game:
+            pareamento["status"] = "em_andamento"
+            pareamento["channel_id"] = str(game["channel_id"])
             game["tournament_id"] = str(torneio["id"])
-            game["tournament_players"] = [uid, oponente]
-            partidas_ativas[str(game["channel_id"])] = [uid, oponente]
+            game["tournament_players"] = jogadores
+            torneio.setdefault("active_matches", {})[str(game["channel_id"])] = jogadores
             if not salvar_admin():
-                logging.error("Partida de torneio iniciada, mas não foi possível salvar o pareamento.")
+                logging.error("Falha ao salvar pareamento suíço %s.", torneio["id"])
         else:
-            partidas_ativas.pop(str(thread.id), None)
+            await interaction.followup.send("Não consegui vincular a partida ao torneio. Avise a administração.", ephemeral=True)
 
 
 @bot.tree.command(name="jogar", description="Entre, crie ou encontre uma mesa de xadrez.")
@@ -5048,9 +5093,17 @@ def iniciar_atividade_com_cobranca(interaction, item, tipo, pagamento="coins"):
         ends_at=(agora + timedelta(hours=int(item.get("duration_hours", 24)))).isoformat()
     )
     if tipo == "torneio":
-        item.setdefault("alive_participants", list(item.get("participants", [])))
-        item.setdefault("eliminated", [])
-        item.setdefault("active_matches", {})
+        participantes = [str(x) for x in item.get("participants", [])]
+        if len(participantes) < 2:
+            return interaction.response.send_message("O torneio precisa de pelo menos 2 inscritos para começar.", ephemeral=True)
+        item["scores"] = {uid: 0.0 for uid in participantes}
+        item["opponents"] = {uid: [] for uid in participantes}
+        item["byes"] = []
+        item["round"] = 0
+        item["total_rounds"] = numero_rodadas_suico(len(participantes))
+        item["rounds"] = []
+        item["matches"] = []
+        preparar_rodada_suica(item)
     if pagamento == "ticket":
         if not salvar_dados():
             item.clear()
@@ -5115,7 +5168,7 @@ def iniciar_atividade_sem_cobranca(interaction, item, tipo):
         return interaction.response.send_message("Esta atividade já foi iniciada.", ephemeral=True)
     anterior = copiar_json(item)
     agora = agora_utc()
-    status_inicio = {"evento": "ativo", "torneio": "inscricoes", "sorteio": "aberto"}.get(tipo, "ativo")
+    status_inicio = {"evento": "ativo", "torneio": "em_andamento", "sorteio": "aberto"}.get(tipo, "ativo")
     item.update(
         started_at=agora.isoformat(),
         charged_coins=0,
@@ -5126,9 +5179,19 @@ def iniciar_atividade_sem_cobranca(interaction, item, tipo):
         ends_at=(agora + timedelta(hours=int(item.get("duration_hours", 24)))).isoformat()
     )
     if tipo == "torneio":
-        item.setdefault("alive_participants", list(item.get("participants", [])))
-        item.setdefault("eliminated", [])
-        item.setdefault("active_matches", {})
+        participantes = [str(x) for x in item.get("participants", [])]
+        if len(participantes) < 2:
+            item.clear()
+            item.update(anterior)
+            return False, "O torneio precisa de pelo menos 2 inscritos para começar."
+        item["scores"] = {uid: 0.0 for uid in participantes}
+        item["opponents"] = {uid: [] for uid in participantes}
+        item["byes"] = []
+        item["round"] = 0
+        item["total_rounds"] = numero_rodadas_suico(len(participantes))
+        item["rounds"] = []
+        item["matches"] = []
+        preparar_rodada_suica(item)
     if not salvar_admin():
         item.clear()
         item.update(anterior)
@@ -6601,15 +6664,11 @@ class CriarTorneioModal(discord.ui.Modal):
             self.formato.value
         ).strip().lower()
 
-        formatos = {
-            "suico",
-            "todos_contra_todos",
-            "eliminacao"
-        }
+        formatos = {"suico"}
 
         if formato not in formatos:
             await interaction.response.send_message(
-                "Formato inválido. Use suico, todos_contra_todos ou eliminacao.",
+                "Formato inválido. O único formato disponível é suico.",
                 ephemeral=True
             )
             return
@@ -6637,8 +6696,8 @@ class CriarTorneioModal(discord.ui.Modal):
         tournament_id, torneio = criar_dados_torneio(self.guild_id,self.owner_id,str(self.nome.value).strip(),formato,horas,"")
         torneio.update(prize_chesscoins=moedas,prize_role_name=str(self.premio_cargo.value).strip(),status="preparacao",
                        scope=self.scope, guild_id=str(self.guild_id) if self.scope == "local" else None,
-                       no_payment=autorizado_dev(self.owner_id),
-                       alive_participants=[], eliminated=[], active_matches={})
+                       no_payment=autorizado_dev(self.owner_id), scores={}, opponents={}, byes=[],
+                       round=0, total_rounds=0, rounds=[], current_pairings=[], active_matches={})
 
         async with admin_lock:
             admin_data["tournaments"][tournament_id] = torneio
