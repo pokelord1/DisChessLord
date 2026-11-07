@@ -4897,7 +4897,40 @@ class PaymentChoiceView(discord.ui.View):
         await interaction.response.edit_message(content=msg, embed=None, view=self)
 
 
+def iniciar_atividade_sem_cobranca(interaction, item, tipo):
+    if item.get("started_at"):
+        return interaction.response.send_message("Esta atividade já foi iniciada.", ephemeral=True)
+    anterior = copiar_json(item)
+    agora = agora_utc()
+    status_inicio = {"evento": "ativo", "torneio": "inscricoes", "sorteio": "aberto"}.get(tipo, "ativo")
+    item.update(
+        started_at=agora.isoformat(),
+        charged_coins=0,
+        charged_tickets=0,
+        payment_method="dev_free",
+        fee_charged=0,
+        status=status_inicio,
+        ends_at=(agora + timedelta(hours=int(item.get("duration_hours", 24)))).isoformat()
+    )
+    if tipo == "torneio":
+        item.setdefault("alive_participants", list(item.get("participants", [])))
+        item.setdefault("eliminated", [])
+        item.setdefault("active_matches", {})
+    if not salvar_admin():
+        item.clear()
+        item.update(anterior)
+        return interaction.response.send_message("Falha ao salvar a atividade; alterações revertidas.", ephemeral=True)
+    if tipo == "sorteio":
+        asyncio.create_task(atualizar_paineis_sorteios(None))
+    return interaction.response.send_message(
+        f"✅ **{item.get('name', 'Atividade')}** iniciado sem cobrança. Todos os custos e tickets foram ignorados por ser uma ação do desenvolvedor.",
+        ephemeral=True
+    )
+
+
 def enviar_selecao_pagamento(interaction, item, tipo):
+    if item.get("no_payment") and autorizado_dev(interaction.user.id):
+        return iniciar_atividade_sem_cobranca(interaction, item, tipo)
     try:
         _, _, _, total, _ = calcular_custo_atividade(
             interaction.guild, interaction.guild_id,
@@ -4936,7 +4969,7 @@ class SorteioCriarModal(discord.ui.Modal):
         self.add_item(self.premio_cargo)
 
     async def on_submit(self, interaction):
-        if interaction.user.id != self.owner_id or not (autorizado_dev(interaction.user.id) if self.scope == "global" else autorizado_adm(interaction)):
+        if interaction.user.id != self.owner_id or not (autorizado_dev(interaction.user.id) or autorizado_adm(interaction)):
             await interaction.response.send_message("Sem autorização para criar sorteios neste escopo.", ephemeral=True)
             return
         dados_admin = obter_dados_usuario(interaction.user.id)
@@ -4958,7 +4991,7 @@ class SorteioCriarModal(discord.ui.Modal):
             "status": "preparacao", "entries": {}, "created_at": data_iso(),
             "guild_id": str(self.guild_id) if self.scope == "local" else None,
             "scope": self.scope,
-            "no_payment": self.scope == "global" and autorizado_dev(self.owner_id),
+            "no_payment": autorizado_dev(self.owner_id),
             "channel_id": interaction.channel_id, "created_by": interaction.user.id
         }
         if not salvar_admin():
@@ -5988,7 +6021,7 @@ class CriarEventoModal(discord.ui.Modal):
     async def on_submit(self, interaction):
         if (
             interaction.user.id != self.owner_id
-            or not (autorizado_dev(interaction.user.id) if self.scope == "global" else autorizado_adm(interaction))
+            or not (autorizado_dev(interaction.user.id) or autorizado_adm(interaction))
         ):
             await interaction.response.send_message(
                 "Sem autorização.",
@@ -6024,7 +6057,7 @@ class CriarEventoModal(discord.ui.Modal):
             "id": evento_id,
             "guild_id": str(self.guild_id) if self.scope == "local" else None,
             "scope": self.scope,
-            "no_payment": self.scope == "global" and autorizado_dev(self.owner_id),
+            "no_payment": autorizado_dev(self.owner_id),
             "creator_id": str(self.owner_id),
             "name": str(self.nome.value).strip(),
             "description": str(self.descricao.value).strip(),
