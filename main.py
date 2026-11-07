@@ -4474,6 +4474,7 @@ class ConfirmResetView(discord.ui.View):
                         novo["command_tickets"] = int(anterior.get("command_tickets", 0))
                         novo["nickname"] = None if self.reset_nick else anterior.get("nickname")
                         novo["titulo"] = None if self.reset_titulo else anterior.get("titulo")
+                        novo["titulos"] = [] if self.reset_titulo else copiar_json(anterior.get("titulos", []))
                         novo["patente_override"] = anterior.get("patente_override")
                     novo["ranking_ativo"] = False
                     user_data[user_id] = novo
