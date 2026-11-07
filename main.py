@@ -3925,6 +3925,137 @@ class RevancheView(discord.ui.View):
 
 
 
+class ListaTorneiosJogarView(discord.ui.View):
+    def __init__(self, torneios, owner_id):
+        super().__init__(timeout=300)
+        self.torneios = {str(t["id"]): t for t in torneios}
+        self.owner_id = owner_id
+        opcoes = [
+            discord.SelectOption(
+                label=str(t.get("name", "Torneio"))[:100],
+                description=f"{len(t.get('participants', []))} inscritos • {t.get('status', 'status')}"[:100],
+                value=str(t["id"])
+            )
+            for t in torneios[:25]
+        ]
+        self.seletor = discord.ui.Select(
+            placeholder="Escolha um torneio",
+            min_values=1, max_values=1, options=opcoes
+        )
+        self.seletor.callback = self.selecionar
+        self.add_item(self.seletor)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Este painel pertence a outro jogador.", ephemeral=True)
+            return False
+        return True
+
+    def torneio_selecionado(self):
+        if not self.seletor.values:
+            return None
+        return admin_data.get("tournaments", {}).get(self.seletor.values[0])
+
+    def criar_embed(self):
+        linhas = []
+        for tid, t in self.torneios.items():
+            vivos = t.get("alive_participants") or t.get("participants", [])
+            eliminados = t.get("eliminated", [])
+            linhas.append(
+                f"**{t.get('name', 'Torneio')}** — {t.get('status')}\n"
+                f"Participantes: **{len(t.get('participants', []))}** • "
+                f"Não eliminados: **{len(vivos)}** • Eliminados: **{len(eliminados)}**"
+            )
+        return discord.Embed(
+            title="🏆 Torneios disponíveis",
+            description="\n\n".join(linhas) or "Nenhum torneio disponível.",
+            color=discord.Color.gold()
+        )
+
+    async def selecionar(self, interaction):
+        torneio = self.torneio_selecionado()
+        if not torneio:
+            await interaction.response.send_message("Torneio não encontrado.", ephemeral=True)
+            return
+        vivos = torneio.get("alive_participants") or torneio.get("participants", [])
+        eliminados = torneio.get("eliminated", [])
+        inscritos = torneio.get("participants", [])
+        nomes_vivos = [nome_jogador(uid, interaction.guild) for uid in vivos[:15]]
+        nomes_eliminados = [nome_jogador(uid, interaction.guild) for uid in eliminados[:15]]
+        embed = discord.Embed(title=f"🏆 {torneio.get('name')}", color=discord.Color.gold())
+        embed.add_field(name="Status", value=torneio.get("status", "desconhecido"), inline=False)
+        embed.add_field(name=f"Não eliminados ({len(vivos)})", value="\n".join(nomes_vivos) or "Nenhum", inline=False)
+        embed.add_field(name=f"Eliminados ({len(eliminados)})", value="\n".join(nomes_eliminados) or "Nenhum", inline=False)
+        embed.set_footer(text=f"Inscritos: {len(inscritos)} • Use /inscrever_torneio enquanto as inscrições estiverem abertas.")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Jogar", emoji="♟️", style=discord.ButtonStyle.success, row=1)
+    async def jogar_torneio(self, interaction, button):
+        if not await exigir_nick(interaction):
+            return
+        torneio = self.torneio_selecionado()
+        if not torneio:
+            await interaction.response.send_message("Selecione um torneio primeiro.", ephemeral=True)
+            return
+        if torneio.get("status") not in ("em_andamento", "inscricoes"):
+            await interaction.response.send_message("Este torneio ainda não está em andamento.", ephemeral=True)
+            return
+        uid = str(interaction.user.id)
+        inscritos = [str(x) for x in torneio.get("participants", [])]
+        vivos = [str(x) for x in (torneio.get("alive_participants") or inscritos)]
+        eliminados = [str(x) for x in torneio.get("eliminated", [])]
+        if uid not in inscritos or uid not in vivos or uid in eliminados:
+            await interaction.response.send_message("Você não está inscrito ou já foi eliminado deste torneio.", ephemeral=True)
+            return
+        partidas_ativas = torneio.setdefault("active_matches", {})
+        if any(uid in [str(x) for x in par] for par in partidas_ativas.values()):
+            await interaction.response.send_message("Você já tem uma partida em andamento neste torneio.", ephemeral=True)
+            return
+        adversarios = [
+            x for x in vivos if x != uid
+            and not any(x in [str(y) for y in par] for par in partidas_ativas.values())
+        ]
+        if not adversarios:
+            await interaction.response.send_message("Não há outro participante disponível para jogar agora.", ephemeral=True)
+            return
+        if jogador_ocupado(interaction.user.id):
+            await interaction.response.send_message("Você já está em outra partida.", ephemeral=True)
+            return
+        oponente = secrets.choice(adversarios)
+        forum = await obter_forum_jogos(interaction)
+        if forum is None:
+            return
+        nome_partida = f"{torneio.get('name', 'Torneio')} — {nome_jogador(uid)} x {nome_jogador(oponente)}"
+        try:
+            created = await forum.create_thread(
+                name=nome_partida[:100],
+                content=f"🏆 **Partida de torneio: {torneio.get('name')}**\n<@{uid}> x <@{oponente}>"
+            )
+            thread = getattr(created, "thread", None) or created[0]
+            message = getattr(created, "message", None) or created[1]
+        except (discord.Forbidden, discord.HTTPException):
+            logging.exception("Falha ao criar partida de torneio.")
+            await interaction.response.send_message("Não consegui criar a mesa do torneio. Verifique as permissões do Fórum.", ephemeral=True)
+            return
+        sid = gerar_id()
+        SALAS_JOGO[sid] = {
+            "id": sid, "name": nome_partida, "owner": int(oponente),
+            "owner_name": nome_jogador(oponente), "guild_id": interaction.guild_id,
+            "private": False, "password": None, "elo": False,
+            "status": "aguardando", "thread": thread, "message": message
+        }
+        await iniciar_sala(interaction, sid)
+        game = active_games.get(thread.id)
+        if game:
+            game["tournament_id"] = str(torneio["id"])
+            game["tournament_players"] = [uid, oponente]
+            partidas_ativas[str(thread.id)] = [uid, oponente]
+            if not salvar_admin():
+                logging.error("Partida de torneio iniciada, mas não foi possível salvar o pareamento.")
+        else:
+            partidas_ativas.pop(str(thread.id), None)
+
+
 @bot.tree.command(name="jogar", description="Entre, crie ou encontre uma mesa de xadrez.")
 @app_commands.choices(acao=[
     app_commands.Choice(name="Partidas disponíveis", value="partidas"),
@@ -4856,7 +4987,7 @@ def iniciar_atividade_com_cobranca(interaction, item, tipo, pagamento="coins"):
         if not alterar_chesscoins(interaction.user.id, -total):
             return False, "Não foi possível cobrar."
     agora = agora_utc()
-    status_inicio = {"evento": "ativo", "torneio": "inscricoes", "sorteio": "aberto"}.get(tipo, "ativo")
+    status_inicio = {"evento": "ativo", "torneio": "em_andamento", "sorteio": "aberto"}.get(tipo, "ativo")
     item.update(
         started_at=agora.isoformat(),
         charged_coins=total if pagamento == "coins" else 0,
