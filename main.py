@@ -4765,6 +4765,8 @@ def iniciar_atividade_com_cobranca(interaction, item, tipo, pagamento="coins"):
         item.update(anterior)
         alterar_chesscoins(interaction.user.id, total)
         return False, "Falha ao salvar; cobrança em ChessCoins revertida."
+    if tipo == "sorteio":
+        asyncio.create_task(atualizar_paineis_sorteios(interaction.guild_id))
     if pagamento == "ticket":
         return True, "Iniciado! Pagamento: **1 ticket administrativo** (cobre o custo completo)."
     return True, f"Iniciado! Cobrança: **{total:,} ChessCoins** (taxa: {taxa:,})."
