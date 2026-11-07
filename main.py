@@ -1479,7 +1479,7 @@ def evento_ativo(guild_id):
 
     for evento in admin_data["events"].values():
 
-        if str(evento.get("guild_id")) != str(guild_id):
+        if evento.get("scope", "local") != "global" and str(evento.get("guild_id")) != str(guild_id):
             continue
 
         if evento.get("status") != "ativo":
@@ -5112,14 +5112,14 @@ class GerenciarSorteioModal(discord.ui.Modal):
 
 
 class GerenciarAtividadeView(discord.ui.View):
-    def __init__(self,owner_id,guild_id,tipo):
-        super().__init__(timeout=180);self.owner_id=owner_id;self.guild_id=guild_id;self.tipo=tipo
+    def __init__(self,owner_id,guild_id,tipo,scope="local"):
+        super().__init__(timeout=180);self.owner_id=owner_id;self.guild_id=guild_id;self.tipo=tipo;self.scope=scope
     async def interaction_check(self,i):
         if i.user.id!=self.owner_id or not autorizado_adm(i): await i.response.send_message("Sem autorização.",ephemeral=True);return False
         return True
     async def abrir(self,i,acao):
         cls={"evento":EventoIdModal,"torneio":TorneioIdModal,"sorteio":GerenciarSorteioModal}[self.tipo]
-        await i.response.send_modal(cls(self.owner_id,self.guild_id,acao))
+        await i.response.send_modal(cls(self.owner_id,self.guild_id,acao,self.scope))
     @discord.ui.button(label="Iniciar",emoji="▶️",style=discord.ButtonStyle.success)
     async def iniciar(self,i,b): await self.abrir(i,"iniciar")
     @discord.ui.button(label="Consultar",emoji="🔎",style=discord.ButtonStyle.primary)
@@ -5147,11 +5147,11 @@ class AtividadeAdmView(discord.ui.View):
 
     def criar_embed(self):
         eventos = [x for x in admin_data.get("events", {}).values()
-                   if x.get("status") in ("ativo", "aberto", "preparacao") and str(x.get("guild_id")) == str(self.guild_id)]
+                   if x.get("status") in ("ativo", "aberto", "preparacao") and x.get("scope", "local") != "global" and str(x.get("guild_id")) == str(self.guild_id)]
         torneios = [x for x in admin_data.get("tournaments", {}).values()
-                    if x.get("status") in ("inscricoes", "inscrições", "ativo", "preparacao") and str(x.get("guild_id")) == str(self.guild_id)]
+                    if x.get("status") in ("inscricoes", "inscrições", "ativo", "preparacao") and x.get("scope", "local") != "global" and str(x.get("guild_id")) == str(self.guild_id)]
         sorteios = [x for x in admin_data.get("raffles", {}).values()
-                    if x.get("status") in ("aberto","preparacao") and str(x.get("guild_id")) == str(self.guild_id)]
+                    if x.get("status") in ("aberto","preparacao") and x.get("scope", "local") != "global" and str(x.get("guild_id")) == str(self.guild_id)]
 
         def linhas(items):
             return "\n".join("• " + str(x.get("name", "Sem nome")) for x in items[:8]) or "Nenhum"
@@ -5165,15 +5165,15 @@ class AtividadeAdmView(discord.ui.View):
 
     @discord.ui.button(label="Criar sorteio", emoji="🎟️", style=discord.ButtonStyle.success, row=0)
     async def criar_sorteio(self, interaction, button):
-        await interaction.response.send_modal(SorteioCriarModal(self.owner_id))
+        await interaction.response.send_modal(SorteioCriarModal(self.owner_id, self.guild_id, "local"))
 
     @discord.ui.button(label="Criar evento", emoji="🎉", style=discord.ButtonStyle.success, row=0)
     async def criar_evento(self, interaction, button):
-        await interaction.response.send_modal(CriarEventoModal(self.owner_id, self.guild_id))
+        await interaction.response.send_modal(CriarEventoModal(self.owner_id, self.guild_id, "local"))
 
     @discord.ui.button(label="Criar torneio", emoji="🏆", style=discord.ButtonStyle.success, row=0)
     async def criar_torneio(self, interaction, button):
-        await interaction.response.send_modal(CriarTorneioModal(self.owner_id, self.guild_id))
+        await interaction.response.send_modal(CriarTorneioModal(self.owner_id, self.guild_id, "local"))
 
     @discord.ui.button(label="Gerenciar sorteios",emoji="🎟️",style=discord.ButtonStyle.primary,row=1)
     async def gerenciar_sorteios(self,i,b):
@@ -5495,6 +5495,49 @@ class EconomiaCargosView(discord.ui.View):
         embed.description = "\n".join(linhas) if linhas else "Nenhum cargo configurado ainda. Use **Definir/editar preço** para adicionar."
         embed.set_footer(text="Defina 0 para remover um cargo da tabela. Os preços são independentes por servidor.")
         return embed
+
+
+class AtividadesDevView(discord.ui.View):
+    def __init__(self, owner_id, guild_id, scope="global"):
+        super().__init__(timeout=180)
+        self.owner_id, self.guild_id, self.scope = owner_id, guild_id, scope
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id or not autorizado_dev(interaction.user.id):
+            await interaction.response.send_message("Sem autorização.", ephemeral=True)
+            return False
+        return True
+
+    def criar_embed(self):
+        def contar(tipo, status):
+            return sum(1 for item in admin_data.get(tipo, {}).values()
+                       if item.get("scope", "local") == self.scope
+                       and item.get("status") in status)
+        embed = discord.Embed(title="🌐 Atividades globais", description="Estas atividades ficam disponíveis em todos os servidores.", color=discord.Color.gold())
+        embed.add_field(name="Eventos", value=str(contar("events", ("ativo", "preparacao"))))
+        embed.add_field(name="Torneios", value=str(contar("tournaments", ("inscricoes", "em_andamento", "preparacao"))))
+        embed.add_field(name="Sorteios", value=str(contar("raffles", ("aberto", "preparacao"))))
+        return embed
+
+    @discord.ui.button(label="Eventos", emoji="🎉", style=discord.ButtonStyle.primary)
+    async def eventos(self, i, b):
+        v = EventosAdminView(self.owner_id, self.guild_id, self.scope)
+        await i.response.edit_message(embed=discord.Embed(title="🌐 Eventos globais", description="Gerencie eventos compartilhados entre servidores."), view=v)
+
+    @discord.ui.button(label="Torneios", emoji="🏆", style=discord.ButtonStyle.primary)
+    async def torneios(self, i, b):
+        v = TorneiosAdminView(self.owner_id, self.guild_id, self.scope)
+        await i.response.edit_message(embed=discord.Embed(title="🌐 Torneios globais", description="Gerencie torneios compartilhados entre servidores."), view=v)
+
+    @discord.ui.button(label="Sorteios", emoji="🎟️", style=discord.ButtonStyle.primary)
+    async def sorteios(self, i, b):
+        v = DevRafflesView(self.owner_id, self.guild_id, self.scope)
+        await i.response.edit_message(embed=discord.Embed(title="🌐 Sorteios globais", description="Gerencie sorteios compartilhados entre servidores."), view=v)
+
+    @discord.ui.button(label="Voltar", emoji="↩️", style=discord.ButtonStyle.secondary, row=1)
+    async def voltar(self, i, b):
+        v = DashboardView(self.owner_id, self.guild_id, "global")
+        await i.response.edit_message(embed=v.criar_embed(), view=v)
 
 
 class DashboardView(discord.ui.View):
@@ -6131,11 +6174,12 @@ class EventoIdModal(discord.ui.Modal):
 
 class EventosAdminView(discord.ui.View):
 
-    def __init__(self, owner_id, guild_id):
+    def __init__(self, owner_id, guild_id, scope="local"):
         super().__init__(timeout=180)
 
         self.owner_id = owner_id
         self.guild_id = guild_id
+        self.scope = scope
 
     async def interaction_check(self, interaction):
         if (
@@ -6159,7 +6203,8 @@ class EventosAdminView(discord.ui.View):
         await interaction.response.send_modal(
             CriarEventoModal(
                 self.owner_id,
-                self.guild_id
+                self.guild_id,
+                self.scope
             )
         )
 
@@ -6173,12 +6218,13 @@ class EventosAdminView(discord.ui.View):
             EventoIdModal(
                 self.owner_id,
                 self.guild_id,
-                "consultar"
+                "consultar",
+                self.scope
             )
         )
 
     @discord.ui.button(label="Iniciar evento",emoji="▶️",style=discord.ButtonStyle.success)
-    async def iniciar(self,i,b): await i.response.send_modal(EventoIdModal(self.owner_id,self.guild_id,"iniciar"))
+    async def iniciar(self,i,b): await i.response.send_modal(EventoIdModal(self.owner_id,self.guild_id,"iniciar",self.scope))
 
     @discord.ui.button(
         label="Encerrar evento",
@@ -6190,7 +6236,8 @@ class EventosAdminView(discord.ui.View):
             EventoIdModal(
                 self.owner_id,
                 self.guild_id,
-                "encerrar"
+                "encerrar",
+                self.scope
             )
         )
 
@@ -6204,7 +6251,8 @@ class EventosAdminView(discord.ui.View):
             EventoIdModal(
                 self.owner_id,
                 self.guild_id,
-                "cancelar"
+                "cancelar",
+                self.scope
             )
         )
 
@@ -6470,11 +6518,12 @@ class TorneioIdModal(discord.ui.Modal):
 
 class TorneiosAdminView(discord.ui.View):
 
-    def __init__(self, owner_id, guild_id):
+    def __init__(self, owner_id, guild_id, scope="local"):
         super().__init__(timeout=180)
 
         self.owner_id = owner_id
         self.guild_id = guild_id
+        self.scope = scope
 
     async def interaction_check(self, interaction):
         if (
@@ -6498,7 +6547,8 @@ class TorneiosAdminView(discord.ui.View):
         await interaction.response.send_modal(
             CriarTorneioModal(
                 self.owner_id,
-                self.guild_id
+                self.guild_id,
+                self.scope
             )
         )
 
@@ -6512,12 +6562,13 @@ class TorneiosAdminView(discord.ui.View):
             TorneioIdModal(
                 self.owner_id,
                 self.guild_id,
-                "consultar"
+                "consultar",
+                self.scope
             )
         )
 
     @discord.ui.button(label="Iniciar torneio",emoji="▶️",style=discord.ButtonStyle.success)
-    async def iniciar(self,i,b): await i.response.send_modal(TorneioIdModal(self.owner_id,self.guild_id,"iniciar"))
+    async def iniciar(self,i,b): await i.response.send_modal(TorneioIdModal(self.owner_id,self.guild_id,"iniciar",self.scope))
 
     @discord.ui.button(
         label="Encerrar torneio",
@@ -6529,7 +6580,8 @@ class TorneiosAdminView(discord.ui.View):
             TorneioIdModal(
                 self.owner_id,
                 self.guild_id,
-                "encerrar"
+                "encerrar",
+                self.scope
             )
         )
 
@@ -6543,7 +6595,8 @@ class TorneiosAdminView(discord.ui.View):
             TorneioIdModal(
                 self.owner_id,
                 self.guild_id,
-                "cancelar"
+                "cancelar",
+                self.scope
             )
         )
 
