@@ -1543,7 +1543,7 @@ def torneios_do_servidor(guild_id):
     return [
         torneio
         for torneio in admin_data["tournaments"].values()
-        if str(torneio.get("guild_id")) == str(guild_id)
+        if torneio.get("scope", "local") == "global" or str(torneio.get("guild_id")) == str(guild_id)
     ]
 
 
@@ -4923,9 +4923,11 @@ def enviar_selecao_pagamento(interaction, item, tipo):
 
 
 class SorteioCriarModal(discord.ui.Modal):
-    def __init__(self, owner_id):
+    def __init__(self, owner_id, guild_id=None, scope="local"):
         super().__init__(title="Criar sorteio", timeout=180)
         self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.scope = scope
         self.nome = discord.ui.TextInput(label="Nome do sorteio", max_length=80)
         self.premio_moedas = discord.ui.TextInput(label="Premiação em ChessCoins (opcional)",required=False,max_length=6)
         self.premio_cargo = discord.ui.TextInput(label="Cargo da premiação (opcional)",required=False,max_length=100)
@@ -4934,8 +4936,8 @@ class SorteioCriarModal(discord.ui.Modal):
         self.add_item(self.premio_cargo)
 
     async def on_submit(self, interaction):
-        if interaction.user.id != self.owner_id or not autorizado_adm(interaction):
-            await interaction.response.send_message("Somente a equipe administrativa pode criar sorteios por este painel.", ephemeral=True)
+        if interaction.user.id != self.owner_id or not (autorizado_dev(interaction.user.id) if self.scope == "global" else autorizado_adm(interaction)):
+            await interaction.response.send_message("Sem autorização para criar sorteios neste escopo.", ephemeral=True)
             return
         dados_admin = obter_dados_usuario(interaction.user.id)
         saldo_tickets = int(dados_admin.get("command_tickets", 0))
@@ -4954,15 +4956,17 @@ class SorteioCriarModal(discord.ui.Modal):
             "prize": f"{moedas:,} ChessCoins" if moedas else "Cargo: "+cargo_nome,
             "prize_chesscoins": moedas, "prize_role_name": cargo_nome, "ticket_cost": 0,
             "status": "preparacao", "entries": {}, "created_at": data_iso(),
-            "guild_id": interaction.guild_id, "channel_id": interaction.channel_id,
-            "created_by": interaction.user.id
+            "guild_id": str(self.guild_id) if self.scope == "local" else None,
+            "scope": self.scope,
+            "no_payment": self.scope == "global" and autorizado_dev(self.owner_id),
+            "channel_id": interaction.channel_id, "created_by": interaction.user.id
         }
         if not salvar_admin():
             admin_data["raffles"].pop(rid, None)
             await interaction.response.send_message("Falha ao salvar o sorteio.", ephemeral=True)
             return
         await interaction.response.send_message(f"🎟️ Sorteio **{nome}** criado e aguardando início. A forma de pagamento será escolhida ao iniciar.", ephemeral=False)
-        await atualizar_paineis_sorteios(interaction.guild_id)
+        await atualizar_paineis_sorteios(None if self.scope == "global" else self.guild_id)
 
 
 class TicketsModal(discord.ui.Modal):
@@ -5262,7 +5266,8 @@ async def adm_dashboard(interaction):
 def sorteios_abertos_do_servidor(guild_id):
     return [
         (rid, r) for rid, r in admin_data.setdefault("raffles", {}).items()
-        if str(r.get("guild_id")) == str(guild_id) and r.get("status") == "aberto"
+        if (r.get("scope", "local") == "global" or str(r.get("guild_id")) == str(guild_id))
+        and r.get("status") == "aberto"
     ]
 
 
@@ -5901,7 +5906,7 @@ class JogadoresAdminView(discord.ui.View):
 # ============================================================
 
 class CriarEventoModal(discord.ui.Modal):
-    def __init__(self, owner_id, guild_id):
+    def __init__(self, owner_id, guild_id, scope="local"):
         super().__init__(
             title="Criar evento",
             timeout=180
@@ -5909,6 +5914,7 @@ class CriarEventoModal(discord.ui.Modal):
 
         self.owner_id = owner_id
         self.guild_id = guild_id
+        self.scope = scope
 
         self.nome = discord.ui.TextInput(
             label="Nome do evento",
@@ -5939,7 +5945,7 @@ class CriarEventoModal(discord.ui.Modal):
     async def on_submit(self, interaction):
         if (
             interaction.user.id != self.owner_id
-            or not autorizado_adm(interaction)
+            or not (autorizado_dev(interaction.user.id) if self.scope == "global" else autorizado_adm(interaction))
         ):
             await interaction.response.send_message(
                 "Sem autorização.",
@@ -5973,7 +5979,9 @@ class CriarEventoModal(discord.ui.Modal):
 
         evento = {
             "id": evento_id,
-            "guild_id": str(self.guild_id),
+            "guild_id": str(self.guild_id) if self.scope == "local" else None,
+            "scope": self.scope,
+            "no_payment": self.scope == "global" and autorizado_dev(self.owner_id),
             "creator_id": str(self.owner_id),
             "name": str(self.nome.value).strip(),
             "description": str(self.descricao.value).strip(),
@@ -6013,7 +6021,7 @@ class CriarEventoModal(discord.ui.Modal):
 
 
 class EventoIdModal(discord.ui.Modal):
-    def __init__(self, owner_id, guild_id, acao):
+    def __init__(self, owner_id, guild_id, acao, scope="local"):
         super().__init__(
             title="Gerenciar evento",
             timeout=180
@@ -6022,6 +6030,7 @@ class EventoIdModal(discord.ui.Modal):
         self.owner_id = owner_id
         self.guild_id = guild_id
         self.acao = acao
+        self.scope = scope
 
         self.evento_id = discord.ui.TextInput(
             label="Nome exato do evento",
@@ -6044,7 +6053,8 @@ class EventoIdModal(discord.ui.Modal):
         nome_evento = " ".join(str(self.evento_id.value).split()).casefold()
         encontrados = [
             (eid, ev) for eid, ev in admin_data.get("events", {}).items()
-            if str(ev.get("guild_id")) == str(self.guild_id)
+            if ev.get("scope", "local") == self.scope
+            and (self.scope == "global" or str(ev.get("guild_id")) == str(self.guild_id))
             and " ".join(str(ev.get("name", "")).split()).casefold() == nome_evento
         ]
         if len(encontrados) != 1:
@@ -6223,7 +6233,7 @@ class EventosAdminView(discord.ui.View):
 # ============================================================
 
 class CriarTorneioModal(discord.ui.Modal):
-    def __init__(self, owner_id, guild_id):
+    def __init__(self, owner_id, guild_id, scope="local"):
         super().__init__(
             title="Criar torneio",
             timeout=180
@@ -6231,6 +6241,7 @@ class CriarTorneioModal(discord.ui.Modal):
 
         self.owner_id = owner_id
         self.guild_id = guild_id
+        self.scope = scope
 
         self.nome = discord.ui.TextInput(
             label="Nome do torneio",
@@ -6260,7 +6271,7 @@ class CriarTorneioModal(discord.ui.Modal):
     async def on_submit(self, interaction):
         if (
             interaction.user.id != self.owner_id
-            or not autorizado_adm(interaction)
+            or not (autorizado_dev(interaction.user.id) if self.scope == "global" else autorizado_adm(interaction))
         ):
             await interaction.response.send_message(
                 "Sem autorização.",
@@ -6313,7 +6324,10 @@ class CriarTorneioModal(discord.ui.Modal):
         if not moedas and not str(self.premio_cargo.value).strip():
             await interaction.response.send_message("Informe pelo menos uma premiação: ChessCoins ou cargo.",ephemeral=True);return
         tournament_id, torneio = criar_dados_torneio(self.guild_id,self.owner_id,str(self.nome.value).strip(),formato,horas,"")
-        torneio.update(prize_chesscoins=moedas,prize_role_name=str(self.premio_cargo.value).strip(),status="preparacao")
+        torneio.update(prize_chesscoins=moedas,prize_role_name=str(self.premio_cargo.value).strip(),status="preparacao",
+                       scope=self.scope, guild_id=str(self.guild_id) if self.scope == "local" else None,
+                       no_payment=self.scope == "global" and autorizado_dev(self.owner_id),
+                       alive_participants=[], eliminated=[], active_matches={})
 
         async with admin_lock:
             admin_data["tournaments"][tournament_id] = torneio
@@ -6342,7 +6356,7 @@ class CriarTorneioModal(discord.ui.Modal):
 
 
 class TorneioIdModal(discord.ui.Modal):
-    def __init__(self, owner_id, guild_id, acao):
+    def __init__(self, owner_id, guild_id, acao, scope="local"):
         super().__init__(
             title="Gerenciar torneio",
             timeout=180
@@ -6351,6 +6365,7 @@ class TorneioIdModal(discord.ui.Modal):
         self.owner_id = owner_id
         self.guild_id = guild_id
         self.acao = acao
+        self.scope = scope
 
         self.tournament_name = discord.ui.TextInput(
             label="Nome exato do torneio",
@@ -6371,8 +6386,10 @@ class TorneioIdModal(discord.ui.Modal):
             return
 
         tournament_name = " ".join(str(self.tournament_name.value).split()).casefold()
-        encontrados = [t for t in torneios_do_servidor(self.guild_id)
-                       if " ".join(str(t.get("name", "")).split()).casefold() == tournament_name]
+        encontrados = [t for t in admin_data.get("tournaments", {}).values()
+                       if t.get("scope", "local") == self.scope
+                       and (self.scope == "global" or str(t.get("guild_id")) == str(self.guild_id))
+                       and " ".join(str(t.get("name", "")).split()).casefold() == tournament_name]
         if len(encontrados) != 1:
             await interaction.response.send_message("Torneio não encontrado ou nome duplicado. Use o nome exato exibido em /torneios.", ephemeral=True)
             return
