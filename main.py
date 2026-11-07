@@ -5179,7 +5179,7 @@ class GerenciarAtividadeView(discord.ui.View):
     def __init__(self,owner_id,guild_id,tipo,scope="local"):
         super().__init__(timeout=180);self.owner_id=owner_id;self.guild_id=guild_id;self.tipo=tipo;self.scope=scope
     async def interaction_check(self,i):
-        if i.user.id!=self.owner_id or not autorizado_adm(i): await i.response.send_message("Sem autorização.",ephemeral=True);return False
+        if i.user.id!=self.owner_id or not (autorizado_dev(i.user.id) or autorizado_adm(i)): await i.response.send_message("Sem autorização.",ephemeral=True);return False
         return True
     async def abrir(self,i,acao):
         cls={"evento":EventoIdModal,"torneio":TorneioIdModal,"sorteio":GerenciarSorteioModal}[self.tipo]
@@ -5204,18 +5204,18 @@ class AtividadeAdmView(discord.ui.View):
         self.guild_id = guild_id
 
     async def interaction_check(self, interaction):
-        if interaction.user.id != self.owner_id or not autorizado_adm(interaction):
+        if interaction.user.id != self.owner_id or not (autorizado_dev(interaction.user.id) or autorizado_adm(interaction)):
             await interaction.response.send_message("Sem autorização para este painel.", ephemeral=True)
             return False
         return True
 
     def criar_embed(self):
         eventos = [x for x in admin_data.get("events", {}).values()
-                   if x.get("status") in ("ativo", "aberto", "preparacao") and x.get("scope", "local") != "global" and str(x.get("guild_id")) == str(self.guild_id)]
+                   if x.get("status") in ("ativo", "aberto", "preparacao") and x.get("scope", "local") == "local" and str(x.get("guild_id")) == str(self.guild_id)]
         torneios = [x for x in admin_data.get("tournaments", {}).values()
-                    if x.get("status") in ("inscricoes", "inscrições", "ativo", "preparacao") and x.get("scope", "local") != "global" and str(x.get("guild_id")) == str(self.guild_id)]
+                    if x.get("status") in ("inscricoes", "inscrições", "ativo", "preparacao") and x.get("scope", "local") == "local" and str(x.get("guild_id")) == str(self.guild_id)]
         sorteios = [x for x in admin_data.get("raffles", {}).values()
-                    if x.get("status") in ("aberto","preparacao") and x.get("scope", "local") != "global" and str(x.get("guild_id")) == str(self.guild_id)]
+                    if x.get("status") in ("aberto","preparacao") and x.get("scope", "local") == "local" and str(x.get("guild_id")) == str(self.guild_id)]
 
         def linhas(items):
             return "\n".join("• " + str(x.get("name", "Sem nome")) for x in items[:8]) or "Nenhum"
@@ -5386,7 +5386,7 @@ class PainelSorteiosView(discord.ui.View):
             return
         rid = self.children[0].values[0]
         raffle = admin_data.setdefault("raffles", {}).get(rid)
-        if rid == "none" or not raffle or str(raffle.get("guild_id")) != str(self.guild_id) or raffle.get("status") != "aberto":
+        if rid == "none" or not raffle or (raffle.get("scope", "local") != "global" and str(raffle.get("guild_id")) != str(self.guild_id)) or raffle.get("status") != "aberto":
             await atualizar_paineis_sorteios(self.guild_id)
             await interaction.response.send_message("Esse sorteio não está mais disponível. A lista foi atualizada.", ephemeral=True)
             return
@@ -5578,8 +5578,11 @@ class AtividadesDevView(discord.ui.View):
         def contar(tipo, status):
             return sum(1 for item in admin_data.get(tipo, {}).values()
                        if item.get("scope", "local") == self.scope
+                       and (self.scope == "global" or str(item.get("guild_id")) == str(self.guild_id))
                        and item.get("status") in status)
-        embed = discord.Embed(title="🌐 Atividades globais", description="Estas atividades ficam disponíveis em todos os servidores.", color=discord.Color.gold())
+        titulo = "🌐 Atividades globais" if self.scope == "global" else "📋 Atividades locais"
+        descricao = "Estas atividades ficam disponíveis em todos os servidores." if self.scope == "global" else "Estas atividades existem somente neste servidor."
+        embed = discord.Embed(title=titulo, description=descricao, color=discord.Color.gold())
         embed.add_field(name="Eventos", value=str(contar("events", ("ativo", "preparacao"))))
         embed.add_field(name="Torneios", value=str(contar("tournaments", ("inscricoes", "em_andamento", "preparacao"))))
         embed.add_field(name="Sorteios", value=str(contar("raffles", ("aberto", "preparacao"))))
@@ -5588,17 +5591,20 @@ class AtividadesDevView(discord.ui.View):
     @discord.ui.button(label="Eventos", emoji="🎉", style=discord.ButtonStyle.primary)
     async def eventos(self, i, b):
         v = EventosAdminView(self.owner_id, self.guild_id, self.scope)
-        await i.response.edit_message(embed=discord.Embed(title="🌐 Eventos globais", description="Gerencie eventos compartilhados entre servidores."), view=v)
+        titulo = "🌐 Eventos globais" if self.scope == "global" else "📋 Eventos locais"
+        await i.response.edit_message(embed=discord.Embed(title=titulo, description="Gerencie eventos neste escopo."), view=v)
 
     @discord.ui.button(label="Torneios", emoji="🏆", style=discord.ButtonStyle.primary)
     async def torneios(self, i, b):
         v = TorneiosAdminView(self.owner_id, self.guild_id, self.scope)
-        await i.response.edit_message(embed=discord.Embed(title="🌐 Torneios globais", description="Gerencie torneios compartilhados entre servidores."), view=v)
+        titulo = "🌐 Torneios globais" if self.scope == "global" else "📋 Torneios locais"
+        await i.response.edit_message(embed=discord.Embed(title=titulo, description="Gerencie torneios neste escopo."), view=v)
 
     @discord.ui.button(label="Sorteios", emoji="🎟️", style=discord.ButtonStyle.primary)
     async def sorteios(self, i, b):
         v = DevRafflesView(self.owner_id, self.guild_id, self.scope)
-        await i.response.edit_message(embed=discord.Embed(title="🌐 Sorteios globais", description="Gerencie sorteios compartilhados entre servidores."), view=v)
+        titulo = "🌐 Sorteios globais" if self.scope == "global" else "📋 Sorteios locais"
+        await i.response.edit_message(embed=discord.Embed(title=titulo, description="Gerencie sorteios neste escopo."), view=v)
 
     @discord.ui.button(label="Voltar", emoji="↩️", style=discord.ButtonStyle.secondary, row=1)
     async def voltar(self, i, b):
@@ -5651,6 +5657,7 @@ class DashboardView(discord.ui.View):
             botoes = [
                 ("Jogadores", "👥", self.abrir_jogadores),
                 ("Atividades globais", "🌐", self.abrir_atividades_globais),
+                ("Atividade do servidor", "📋", self.abrir_atividade_local),
                 ("Peças", "♟️", self.abrir_pecas),
                 ("Missões globais", "🎯", self.abrir_missoes),
                 ("Estatísticas", "📊", self.abrir_estatisticas),
@@ -5706,6 +5713,10 @@ class DashboardView(discord.ui.View):
 
     async def abrir_atividades_globais(self, interaction):
         view = AtividadesDevView(self.owner_id, self.guild_id, "global")
+        await interaction.response.edit_message(embed=view.criar_embed(), view=view)
+
+    async def abrir_atividade_local(self, interaction):
+        view = AtividadeAdmView(self.owner_id, self.guild_id)
         await interaction.response.edit_message(embed=view.criar_embed(), view=view)
 
     async def abrir_economia(self, interaction):
@@ -5986,7 +5997,7 @@ class JogadoresAdminView(discord.ui.View):
             JogadorTituloModal(self.owner_id)
         )
 
-    @discord.ui.button(label="Dar tickets", emoji="🎫", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Dar tickets", emoji="🎫", style=discord.ButtonStyle.success, row=0)
     async def tickets(self, interaction, button):
         await interaction.response.send_modal(TicketsModal(self.owner_id))
 
@@ -6174,7 +6185,7 @@ class EventoIdModal(discord.ui.Modal):
             return
         evento_id, evento = encontrados[0]
 
-        if str(evento.get("guild_id")) != str(self.guild_id):
+        if self.scope != "global" and str(evento.get("guild_id")) != str(self.guild_id):
             await interaction.response.send_message(
                 "Esse evento pertence a outro servidor.",
                 ephemeral=True
@@ -6510,7 +6521,7 @@ class TorneioIdModal(discord.ui.Modal):
         torneio = encontrados[0]
         tournament_id = torneio["id"]
 
-        if str(torneio["guild_id"]) != str(self.guild_id):
+        if self.scope != "global" and str(torneio.get("guild_id")) != str(self.guild_id):
             await interaction.response.send_message(
                 "Esse torneio pertence a outro servidor.",
                 ephemeral=True
@@ -7372,7 +7383,7 @@ async def eventos(interaction):
     lista = [
         evento
         for evento in admin_data["events"].values()
-        if str(evento.get("guild_id")) == str(interaction.guild_id)
+        if (evento.get("scope", "local") == "global" or str(evento.get("guild_id")) == str(interaction.guild_id))
         and evento.get("status") == "ativo"
     ]
 
@@ -7521,7 +7532,7 @@ async def inscrever_torneio(
         )
         return
 
-    if str(torneio["guild_id"]) != str(interaction.guild_id):
+    if torneio.get("scope", "local") != "global" and str(torneio.get("guild_id")) != str(interaction.guild_id):
         await interaction.response.send_message(
             "Esse torneio pertence a outro servidor.",
             ephemeral=True
