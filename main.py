@@ -622,7 +622,7 @@ class MissionAdminView(discord.ui.View):
                 status = "🟢 Ativa" if m.get("active", True) else "⚫ Inativa"
                 embed.add_field(
                     name=str(m.get("name") or "Missão")[:256],
-                    value=f"{tipo}\\n{status}\\n**Objetivo:** {objetivo}: {int(m.get('target', 1))}\\n**Recompensa:** {int(m.get('reward', 0)):,} {'tickets' if m.get('kind') == 'special' else 'ChessCoins'}",
+                    value=f"{tipo}\n{status}\n**Objetivo:** {objetivo}: {int(m.get('target', 1))}\n**Recompensa:** {int(m.get('reward', 0)):,} {'tickets' if m.get('kind') == 'special' else 'ChessCoins'}",
                     inline=False
                 )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -1032,7 +1032,7 @@ def criar_embed_missoes_jogador(user_id, guild):
         if m.get("active", True) and (m.get("kind") != "special" or eh_admin)
     ]
     if not visiveis:
-        embed.description += "\\n\\nNão há missões disponíveis para você no momento."
+        embed.description += "\n\nNão há missões disponíveis para você no momento."
         return embed
 
     for mid, missao in visiveis[:20]:
@@ -1044,7 +1044,7 @@ def criar_embed_missoes_jogador(user_id, guild):
         status = "✅ Concluída — recompensa entregue" if mid in concluidas else f"📊 Progresso: **{atual}/{alvo}**"
         embed.add_field(
             name=str(missao.get("name") or "Missão")[:256],
-            value=f"**Objetivo:** {objetivo}\\n{status}\\n**Recompensa:** {recompensa:,} {moeda}",
+            value=f"**Objetivo:** {objetivo}\n{status}\n**Recompensa:** {recompensa:,} {moeda}",
             inline=False
         )
     embed.set_footer(text="Missões especiais aparecem somente para administradores do servidor.")
