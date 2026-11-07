@@ -4869,6 +4869,7 @@ class SorteioCriarModal(discord.ui.Modal):
             await interaction.response.send_message("Falha ao salvar o sorteio.", ephemeral=True)
             return
         await interaction.response.send_message(f"🎟️ Sorteio **{nome}** criado e aguardando início. A forma de pagamento será escolhida ao iniciar.", ephemeral=False)
+        await atualizar_paineis_sorteios(interaction.guild_id)
 
 
 class TicketsModal(discord.ui.Modal):
@@ -4891,12 +4892,16 @@ class TicketsModal(discord.ui.Modal):
         except ValueError:
             await interaction.response.send_message("Quantidade inválida. Use de 1 a 100.000.", ephemeral=True)
             return
-        member, erro_membro = buscar_membro_por_nome(interaction.guild, self.user_id.value)
-        if erro_membro:
-            await interaction.response.send_message(erro_membro, ephemeral=True)
+        jogador, erro_jogador = await buscar_jogador_global(self.user_id.value)
+        if erro_jogador:
+            await interaction.response.send_message(erro_jogador, ephemeral=True)
+            return
+        member = interaction.guild.get_member(int(jogador["id"]))
+        if member is None:
+            await interaction.response.send_message("Esse nick pertence a alguém que não está neste servidor.", ephemeral=True)
             return
         uid = member.id
-        if member is None or not autorizado_adm(interaction) or not (
+        if not autorizado_adm(interaction) or not (
             member.guild_permissions.administrator
             or member.guild_permissions.manage_guild
             or member.guild_permissions.moderate_members
@@ -5018,6 +5023,7 @@ class GerenciarSorteioModal(discord.ui.Modal):
             r.clear();r.update(old);await i.response.send_message("Falha ao salvar; alteração revertida.",ephemeral=True);return
         if self.acao=="encerrar" and winner: await i.channel.send(f"🏆 Sorteio **{r['name']}** encerrado! Vencedor: <@{winner}>. Prêmio: {r['prize']}")
         await i.response.send_message(f"Sorteio {self.acao} concluído.",ephemeral=True)
+        await atualizar_paineis_sorteios(i.guild_id)
 
 
 class GerenciarAtividadeView(discord.ui.View):
@@ -5168,39 +5174,141 @@ async def adm_dashboard(interaction):
         )
 
 
-@bot.tree.command(name="sorteios", description="Veja os sorteios abertos.")
-async def sorteios(interaction):
-    abertos = [x for x in admin_data.setdefault("raffles", {}).values()
-               if x.get("status") == "aberto" and (interaction.guild_id is None or x.get("guild_id") == interaction.guild_id)]
-    if not abertos:
-        await interaction.response.send_message("Não há sorteios abertos.", ephemeral=True)
-        return
-    embed = discord.Embed(title="🎟️ Sorteios abertos", color=discord.Color.gold())
-    for x in abertos[:10]:
-        embed.add_field(name=x["name"], value=f"Prêmio: **{x['prize']}**\nCusto: **{x['ticket_cost']} ticket(s)** por entrada\nParticipantes: **{len(x.get('entries', {}))}**", inline=False)
-    await interaction.response.send_message(embed=embed)
+# ============================================================
+# PAINEL PERMANENTE DE SORTEIOS
+# ============================================================
+
+def sorteios_abertos_do_servidor(guild_id):
+    return [
+        (rid, r) for rid, r in admin_data.setdefault("raffles", {}).items()
+        if str(r.get("guild_id")) == str(guild_id) and r.get("status") == "aberto"
+    ]
 
 
-@bot.tree.command(name="participar_sorteio", description="Entre em um sorteio aberto.")
-@app_commands.describe(nome_sorteio="Nome exato do sorteio")
-async def participar_sorteio(interaction, nome_sorteio: str):
-    nome = " ".join(nome_sorteio.strip().split()).casefold()
-    encontrados = [x for x in admin_data.setdefault("raffles", {}).values()
-                   if x.get("status") == "aberto" and x.get("guild_id") == interaction.guild_id
-                   and " ".join(str(x.get("name", "")).split()).casefold() == nome]
-    if len(encontrados) != 1:
-        await interaction.response.send_message("Sorteio não encontrado ou nome duplicado. Confira /sorteios.", ephemeral=True)
-        return
-    raffle = encontrados[0]
-    entradas = raffle.setdefault("entries", {})
-    uid = str(interaction.user.id)
-    entradas[uid] = int(entradas.get(uid, 0)) + 1
-    if not salvar_admin():
-        entradas[uid] -= 1
-        await interaction.response.send_message("Não foi possível registrar sua participação.", ephemeral=True)
-        return
-    await interaction.response.send_message(f"🎟️ Você entrou em **{raffle['name']}**! Boa sorte.", ephemeral=True)
+def criar_embed_painel_sorteios(guild_id):
+    abertos = sorteios_abertos_do_servidor(guild_id)
+    embed = discord.Embed(
+        title="🎟️ Sorteios disponíveis",
+        description=(
+            "Escolha um sorteio no menu abaixo para participar."
+            if abertos else
+            "No momento não há sorteios disponíveis. Quando um sorteio for iniciado, ele aparecerá aqui."
+        ),
+        color=discord.Color.gold()
+    )
+    for _, raffle in abertos[:10]:
+        embed.add_field(
+            name=str(raffle.get("name", "Sorteio"))[:256],
+            value=f"Prêmio: **{raffle.get('prize', 'Não informado')}**\\n"
+                  f"Participantes: **{len(raffle.get('entries', {}))}**",
+            inline=False
+        )
+    return embed
 
+
+class PainelSorteiosView(discord.ui.View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=None)
+        self.guild_id = int(guild_id)
+        abertos = sorteios_abertos_do_servidor(self.guild_id)
+        opcoes = [
+            discord.SelectOption(
+                label=str(r.get("name", "Sorteio"))[:100],
+                description=f"Prêmio: {str(r.get('prize', 'Não informado'))[:90]}",
+                value=rid
+            )
+            for rid, r in abertos[:25]
+        ]
+        if not opcoes:
+            opcoes = [discord.SelectOption(label="Nenhum sorteio disponível", value="none")]
+        seletor = discord.ui.Select(
+            placeholder="Escolha o sorteio para participar",
+            min_values=1, max_values=1, options=opcoes,
+            disabled=not bool(abertos),
+            custom_id=f"dischess:sorteios:{self.guild_id}"
+        )
+        seletor.callback = self.participar
+        self.add_item(seletor)
+
+    async def participar(self, interaction):
+        if interaction.guild_id != self.guild_id:
+            await interaction.response.send_message("Este painel pertence a outro servidor.", ephemeral=True)
+            return
+        rid = self.children[0].values[0]
+        raffle = admin_data.setdefault("raffles", {}).get(rid)
+        if rid == "none" or not raffle or str(raffle.get("guild_id")) != str(self.guild_id) or raffle.get("status") != "aberto":
+            await atualizar_paineis_sorteios(self.guild_id)
+            await interaction.response.send_message("Esse sorteio não está mais disponível. A lista foi atualizada.", ephemeral=True)
+            return
+        uid = str(interaction.user.id)
+        anterior = int(raffle.setdefault("entries", {}).get(uid, 0))
+        raffle["entries"][uid] = anterior + 1
+        if not salvar_admin():
+            if anterior:
+                raffle["entries"][uid] = anterior
+            else:
+                raffle["entries"].pop(uid, None)
+            await interaction.response.send_message("Não foi possível registrar sua participação.", ephemeral=True)
+            return
+        await interaction.response.send_message(f"🎟️ Você entrou em **{raffle['name']}**! Boa sorte.", ephemeral=True)
+        await atualizar_paineis_sorteios(self.guild_id)
+
+
+async def atualizar_paineis_sorteios(guild_id):
+    if guild_id is None:
+        return
+    registro = admin_data.setdefault("settings", {}).setdefault("raffle_panels", {}).get(str(guild_id))
+    if not isinstance(registro, dict):
+        return
+    try:
+        guild = bot.get_guild(int(guild_id))
+        canal_id = int(registro.get("channel_id", 0))
+        canal = guild.get_channel(canal_id) if guild else None
+        if canal is None:
+            canal = await bot.fetch_channel(canal_id)
+        mensagem = await canal.fetch_message(int(registro.get("message_id", 0)))
+        await mensagem.edit(embed=criar_embed_painel_sorteios(guild_id), view=PainelSorteiosView(guild_id))
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        logging.exception("Não foi possível atualizar o painel permanente de sorteios do servidor %s.", guild_id)
+
+
+@bot.tree.command(name="serv_sorteios", description="Publica ou atualiza o painel permanente de sorteios.")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(administrator=True)
+async def serv_sorteios(interaction):
+    if interaction.guild is None or not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Somente administradores do servidor podem usar este comando.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    paineis = admin_data.setdefault("settings", {}).setdefault("raffle_panels", {})
+    registro = paineis.get(str(interaction.guild_id))
+    view = PainelSorteiosView(interaction.guild_id)
+    embed = criar_embed_painel_sorteios(interaction.guild_id)
+    try:
+        if isinstance(registro, dict):
+            canal_id = int(registro.get("channel_id", 0))
+            canal = interaction.guild.get_channel(canal_id) or await bot.fetch_channel(canal_id)
+            mensagem = await canal.fetch_message(int(registro.get("message_id", 0)))
+            await mensagem.edit(embed=embed, view=view)
+            acao = "Painel permanente atualizado."
+        else:
+            mensagem = await interaction.channel.send(embed=embed, view=view)
+            paineis[str(interaction.guild_id)] = {"channel_id": interaction.channel_id, "message_id": mensagem.id}
+            if not salvar_admin():
+                paineis.pop(str(interaction.guild_id), None)
+                await mensagem.delete()
+                await interaction.followup.send("Não consegui salvar o painel. Tente novamente.", ephemeral=True)
+                return
+            acao = "Painel permanente criado. Não precisará executar este comando novamente."
+    except discord.NotFound:
+        mensagem = await interaction.channel.send(embed=embed, view=view)
+        paineis[str(interaction.guild_id)] = {"channel_id": interaction.channel_id, "message_id": mensagem.id}
+        salvar_admin()
+        acao = "O painel anterior não existia mais; criei outro."
+    except discord.Forbidden:
+        await interaction.followup.send("Preciso de permissão para enviar e editar mensagens neste canal.", ephemeral=True)
+        return
+    await interaction.followup.send(acao, ephemeral=True)
 
 
 # ============================================================
@@ -7322,6 +7430,12 @@ async def on_ready():
         data_loaded = True
 
     atualizar_eventos_expirados()
+
+    for guild_id in admin_data.setdefault("settings", {}).setdefault("raffle_panels", {}):
+        try:
+            bot.add_view(PainelSorteiosView(int(guild_id)))
+        except Exception:
+            logging.exception("Falha ao registrar painel permanente de sorteios %s.", guild_id)
 
     try:
         sincronizados = await bot.tree.sync()
