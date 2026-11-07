@@ -4040,6 +4040,9 @@ class ListaTorneiosJogarView(discord.ui.View):
         if torneio.get("status") not in ("em_andamento", "inscricoes"):
             await interaction.response.send_message("Este torneio ainda não está em andamento.", ephemeral=True)
             return
+        if torneio.get("format") != "eliminacao":
+            await interaction.response.send_message("O pareamento automático com eliminação está disponível no formato eliminacao. Este torneio usa outro formato.", ephemeral=True)
+            return
         uid = str(interaction.user.id)
         inscritos = [str(x) for x in torneio.get("participants", [])]
         vivos = [str(x) for x in (torneio.get("alive_participants") or inscritos)]
