@@ -5001,9 +5001,11 @@ class TicketsModal(discord.ui.Modal):
 
 
 class DevRafflesView(discord.ui.View):
-    def __init__(self, owner_id):
+    def __init__(self, owner_id, guild_id=None, scope="global"):
         super().__init__(timeout=180)
         self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.scope = scope
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.owner_id or not autorizado_dev(interaction.user.id):
@@ -5013,20 +5015,16 @@ class DevRafflesView(discord.ui.View):
 
     @discord.ui.button(label="Criar sorteio", emoji="🎟️", style=discord.ButtonStyle.success)
     async def criar(self, interaction, button):
-        await interaction.response.send_modal(SorteioCriarModal(self.owner_id))
-
-    @discord.ui.button(label="Distribuir tickets", emoji="🎫", style=discord.ButtonStyle.primary)
-    async def tickets(self, interaction, button):
-        await interaction.response.send_modal(TicketsModal(self.owner_id))
+        await interaction.response.send_modal(SorteioCriarModal(self.owner_id, self.guild_id, self.scope))
 
     @discord.ui.button(label="Iniciar sorteio",emoji="▶️",style=discord.ButtonStyle.success)
-    async def iniciar(self,i,b): await i.response.send_modal(GerenciarSorteioModal(self.owner_id,i.guild_id,"iniciar"))
+    async def iniciar(self,i,b): await i.response.send_modal(GerenciarSorteioModal(self.owner_id,self.guild_id,"iniciar",self.scope))
 
     @discord.ui.button(label="Consultar sorteio",emoji="🔎",style=discord.ButtonStyle.primary)
-    async def consultar(self,i,b): await i.response.send_modal(GerenciarSorteioModal(self.owner_id,i.guild_id,"consultar"))
+    async def consultar(self,i,b): await i.response.send_modal(GerenciarSorteioModal(self.owner_id,self.guild_id,"consultar",self.scope))
 
     @discord.ui.button(label="Cancelar sorteio",emoji="🗑️",style=discord.ButtonStyle.secondary)
-    async def cancelar(self,i,b): await i.response.send_modal(GerenciarSorteioModal(self.owner_id,i.guild_id,"cancelar"))
+    async def cancelar(self,i,b): await i.response.send_modal(GerenciarSorteioModal(self.owner_id,self.guild_id,"cancelar",self.scope))
 
     @discord.ui.button(label="Voltar", emoji="↩️", style=discord.ButtonStyle.secondary, row=2)
     async def voltar(self, interaction, button):
@@ -5073,14 +5071,15 @@ class DevRafflesView(discord.ui.View):
 
 
 class GerenciarSorteioModal(discord.ui.Modal):
-    def __init__(self,owner_id,guild_id,acao):
-        super().__init__(title="Gerenciar sorteio",timeout=180);self.owner_id=owner_id;self.guild_id=guild_id;self.acao=acao
+    def __init__(self,owner_id,guild_id,acao,scope="local"):
+        super().__init__(title="Gerenciar sorteio",timeout=180);self.owner_id=owner_id;self.guild_id=guild_id;self.acao=acao;self.scope=scope
         self.ident=discord.ui.TextInput(label="Nome exato do sorteio",max_length=80);self.add_item(self.ident)
     async def on_submit(self,i):
         if i.user.id!=self.owner_id or not autorizado_gestor_atividade(i): await i.response.send_message("Sem autorização.",ephemeral=True);return
         nome_busca = " ".join(str(self.ident.value).split()).casefold()
         encontrados = [(rid, item) for rid, item in admin_data.setdefault("raffles", {}).items()
-                       if str(item.get("guild_id")) == str(self.guild_id)
+                       if item.get("scope", "local") == self.scope
+                       and (self.scope == "global" or str(item.get("guild_id")) == str(self.guild_id))
                        and " ".join(str(item.get("name", "")).split()).casefold() == nome_busca]
         if len(encontrados) != 1:
             await i.response.send_message("Sorteio não encontrado ou nome duplicado. Confira a lista e informe o nome exato.", ephemeral=True)
@@ -5530,14 +5529,14 @@ class DashboardView(discord.ui.View):
 
         if self.tab == "server":
             botoes = [
-                ("Eventos", "🎉", self.abrir_eventos),
-                ("Torneios", "🏆", self.abrir_torneios),
-                ("Economia", "🪙", self.abrir_economia),
-                ("Sorteios", "🎟️", self.abrir_sorteios),
+                ("Eventos locais", "🎉", self.abrir_eventos),
+                ("Torneios locais", "🏆", self.abrir_torneios),
+                ("Sorteios locais", "🎟️", self.abrir_sorteios),
             ]
         else:
             botoes = [
                 ("Jogadores", "👥", self.abrir_jogadores),
+                ("Atividades globais", "🌐", self.abrir_atividades_globais),
                 ("Peças", "♟️", self.abrir_pecas),
                 ("Missões globais", "🎯", self.abrir_missoes),
                 ("Estatísticas", "📊", self.abrir_estatisticas),
@@ -5576,11 +5575,11 @@ class DashboardView(discord.ui.View):
         await interaction.response.edit_message(embed=discord.Embed(title="👥 Administração global de jogadores", description="Gerencie perfis e dados dos jogadores.", color=discord.Color.blurple()), view=view)
 
     async def abrir_eventos(self, interaction):
-        view = EventosAdminView(self.owner_id, self.guild_id)
+        view = EventosAdminView(self.owner_id, self.guild_id, "local")
         await interaction.response.edit_message(embed=discord.Embed(title="🎉 Administração de eventos do servidor", description="Crie, consulte, encerre ou cancele eventos deste servidor.", color=discord.Color.blurple()), view=view)
 
     async def abrir_torneios(self, interaction):
-        view = TorneiosAdminView(self.owner_id, self.guild_id)
+        view = TorneiosAdminView(self.owner_id, self.guild_id, "local")
         await interaction.response.edit_message(embed=discord.Embed(title="🏆 Administração de torneios do servidor", description="Gerencie torneios deste servidor.", color=discord.Color.gold()), view=view)
 
     async def abrir_pecas(self, interaction):
@@ -5588,8 +5587,12 @@ class DashboardView(discord.ui.View):
         await interaction.response.edit_message(embed=discord.Embed(title="♟️ Biblioteca global de peças", description="Crie, edite, duplique e remova peças personalizadas.", color=discord.Color.blurple()), view=view)
 
     async def abrir_sorteios(self, interaction):
-        view = DevRafflesView(self.owner_id)
-        await interaction.response.edit_message(embed=discord.Embed(title="🎟️ Sorteios e tickets globais", description="Administre sorteios e distribuição de tickets.", color=discord.Color.gold()), view=view)
+        view = DevRafflesView(self.owner_id, self.guild_id, "local")
+        await interaction.response.edit_message(embed=discord.Embed(title="🎟️ Sorteios locais", description="Sorteios exclusivos deste servidor.", color=discord.Color.gold()), view=view)
+
+    async def abrir_atividades_globais(self, interaction):
+        view = AtividadesDevView(self.owner_id, self.guild_id, "global")
+        await interaction.response.edit_message(embed=view.criar_embed(), view=view)
 
     async def abrir_economia(self, interaction):
         view = EconomiaCargosView(self.owner_id, self.guild_id)
@@ -5868,6 +5871,10 @@ class JogadoresAdminView(discord.ui.View):
         await interaction.response.send_modal(
             JogadorTituloModal(self.owner_id)
         )
+
+    @discord.ui.button(label="Dar tickets", emoji="🎫", style=discord.ButtonStyle.success, row=1)
+    async def tickets(self, interaction, button):
+        await interaction.response.send_modal(TicketsModal(self.owner_id))
 
     @discord.ui.button(
         label="Voltar",
