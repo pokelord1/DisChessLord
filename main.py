@@ -3544,7 +3544,7 @@ async def iniciar_sala(interaction, sala_id):
         guild_original_id = getattr(
             getattr(thread_original, "guild", None), "id", None
         )
-        mesma_guild = guild_original_id == interaction.guild_id
+        mesma_guild = (guild_original_id == interaction.guild_id and interaction.guild.get_member(int(sala["owner"])) is not None)
 
         forum_partida = forum_atual
         if brancas == sala["owner"]:
@@ -5040,6 +5040,10 @@ def iniciar_atividade_com_cobranca(interaction, item, tipo, pagamento="coins"):
         status=status_inicio,
         ends_at=(agora + timedelta(hours=int(item.get("duration_hours", 24)))).isoformat()
     )
+    if tipo == "torneio":
+        item.setdefault("alive_participants", list(item.get("participants", [])))
+        item.setdefault("eliminated", [])
+        item.setdefault("active_matches", {})
     if pagamento == "ticket":
         if not salvar_dados():
             item.clear()
@@ -5267,12 +5271,15 @@ class DevRafflesView(discord.ui.View):
 
     @discord.ui.button(label="Voltar", emoji="↩️", style=discord.ButtonStyle.secondary, row=2)
     async def voltar(self, interaction, button):
-        view = DashboardView(self.owner_id, interaction.guild_id, "server")
+        if self.scope == "global":
+            view = AtividadesDevView(self.owner_id, self.guild_id, "global")
+        else:
+            view = DashboardView(self.owner_id, interaction.guild_id, "server")
         await interaction.response.edit_message(embed=view.criar_embed(), view=view)
 
     @discord.ui.button(label="Encerrar sorteio", emoji="🔒", style=discord.ButtonStyle.danger)
     async def encerrar(self, interaction, button):
-        abertos = [(k, v) for k, v in admin_data.setdefault("raffles", {}).items() if v.get("status") == "aberto"]
+        abertos = [(k, v) for k, v in admin_data.setdefault("raffles", {}).items() if v.get("status") == "aberto" and v.get("scope", "local") == self.scope and (self.scope == "global" or str(v.get("guild_id")) == str(self.guild_id))]
         if not abertos:
             await interaction.response.send_message("Não há sorteios abertos.", ephemeral=True)
             return
@@ -6187,7 +6194,8 @@ class JogadoresAdminView(discord.ui.View):
             ),
             view=DashboardView(
                 self.owner_id,
-                self.guild_id
+                self.guild_id,
+                "global" if self.scope == "global" else "server"
             )
         )
 
