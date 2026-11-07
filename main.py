@@ -4054,6 +4054,8 @@ class ListaTorneiosJogarView(discord.ui.View):
         adversarios = [
             x for x in vivos if x != uid
             and not any(x in [str(y) for y in par] for par in partidas_ativas.values())
+            and usuario_tem_nick(x)
+            and not jogador_ocupado(int(x))
         ]
         if not adversarios:
             await interaction.response.send_message("Não há outro participante disponível para jogar agora.", ephemeral=True)
@@ -4085,11 +4087,13 @@ class ListaTorneiosJogarView(discord.ui.View):
             "status": "aguardando", "thread": thread, "message": message
         }
         await iniciar_sala(interaction, sid)
-        game = active_games.get(thread.id)
+        game = next((g for g in active_games.values()
+                     if g.get("room_name") == nome_partida
+                     and {str(g.get("white")), str(g.get("black"))} == {uid, oponente}), None)
         if game:
             game["tournament_id"] = str(torneio["id"])
             game["tournament_players"] = [uid, oponente]
-            partidas_ativas[str(thread.id)] = [uid, oponente]
+            partidas_ativas[str(game["channel_id"])] = [uid, oponente]
             if not salvar_admin():
                 logging.error("Partida de torneio iniciada, mas não foi possível salvar o pareamento.")
         else:
