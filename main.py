@@ -6162,7 +6162,7 @@ class EventoIdModal(discord.ui.Modal):
     async def on_submit(self, interaction):
         if (
             interaction.user.id != self.owner_id
-            or not autorizado_adm(interaction)
+            or not autorizado_gestor_atividade(interaction)
         ):
             await interaction.response.send_message(
                 "Sem autorização.",
@@ -6451,7 +6451,7 @@ class CriarTorneioModal(discord.ui.Modal):
         tournament_id, torneio = criar_dados_torneio(self.guild_id,self.owner_id,str(self.nome.value).strip(),formato,horas,"")
         torneio.update(prize_chesscoins=moedas,prize_role_name=str(self.premio_cargo.value).strip(),status="preparacao",
                        scope=self.scope, guild_id=str(self.guild_id) if self.scope == "local" else None,
-                       no_payment=self.scope == "global" and autorizado_dev(self.owner_id),
+                       no_payment=autorizado_dev(self.owner_id),
                        alive_participants=[], eliminated=[], active_matches={})
 
         async with admin_lock:
@@ -6502,7 +6502,7 @@ class TorneioIdModal(discord.ui.Modal):
     async def on_submit(self, interaction):
         if (
             interaction.user.id != self.owner_id
-            or not autorizado_adm(interaction)
+            or not autorizado_gestor_atividade(interaction)
         ):
             await interaction.response.send_message(
                 "Sem autorização.",
