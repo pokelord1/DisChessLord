@@ -5204,7 +5204,7 @@ class SorteioCriarModal(discord.ui.Modal):
             admin_data["raffles"].pop(rid, None)
             await interaction.response.send_message("Falha ao salvar o sorteio.", ephemeral=True)
             return
-        await interaction.response.send_message(f"🎟️ Sorteio **{nome}** criado e aguardando início. A forma de pagamento será escolhida ao iniciar.", ephemeral=False)
+        await interaction.response.send_message(f"🎟️ Sorteio **{nome}** criado e aguardando início. " + ("Você poderá iniciar sem pagar como desenvolvedor." if autorizado_dev(self.owner_id) else "A forma de pagamento será escolhida ao iniciar."), ephemeral=False)
         await atualizar_paineis_sorteios(None if self.scope == "global" else self.guild_id)
 
 
@@ -6313,7 +6313,7 @@ class CriarEventoModal(discord.ui.Modal):
             embed=embed_sucesso(
                 f"Evento **{evento['name']}** criado e aguardando início.\n"
                 
-                f"Duração: {horas} horas. A cobrança será feita ao iniciar."
+                f"Duração: {horas} horas. " + ("Você, como desenvolvedor, pode iniciar sem pagar." if autorizado_dev(self.owner_id) else "A cobrança será feita ao iniciar.")
             ),
             ephemeral=False
         )
@@ -6653,7 +6653,7 @@ class CriarTorneioModal(discord.ui.Modal):
                 f"Torneio **{torneio['name']}** criado.\n"
 
                 f"Formato: `{formato}`\n"
-                "Aguardando início. A cobrança será calculada ao iniciar."
+                ("Aguardando início. Você pode iniciar sem custo como desenvolvedor." if autorizado_dev(self.owner_id) else "Aguardando início. A cobrança será calculada ao iniciar.")
             ),
             ephemeral=False
         )
