@@ -4081,7 +4081,7 @@ class ListaTorneiosJogarView(discord.ui.View):
                 jogos.append(f"{'✅' if par.get('status') == 'concluida' else '♟️'} {nome_jogador(jogadores[0], interaction.guild)} × {nome_jogador(jogadores[1], interaction.guild)}")
         if jogos:
             embed.add_field(name="Pareamentos da rodada", value="\n".join(jogos)[:1024], inline=False)
-        embed.set_footer(text="Use /inscrever_torneio durante as inscrições. O botão Jogar abre seu confronto da rodada.")
+        embed.set_footer(text="Formato suíço: vitória 1 ponto, empate 0,5 e derrota 0. O botão Jogar abre seu confronto da rodada.")
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Jogar", emoji="♟️", style=discord.ButtonStyle.success, row=1)
@@ -4180,7 +4180,7 @@ async def jogar(interaction, acao: str = None):
         return
     if acao == "torneios":
         torneios_ativos = [t for t in torneios_do_servidor(interaction.guild_id)
-                           if t.get("status") in ("inscricoes", "em_andamento")]
+                           if t.get("format") == "suico" and t.get("status") in ("inscricoes", "em_andamento")]
         if not torneios_ativos:
             await interaction.response.send_message("Não há torneios disponíveis neste servidor.", ephemeral=True)
             return
@@ -5056,6 +5056,8 @@ def calcular_custo_atividade(guild, guild_id, moedas, nome_cargo):
 
 
 def iniciar_atividade_com_cobranca(interaction, item, tipo, pagamento="coins"):
+    if tipo == "torneio" and len(item.get("participants", [])) < 2:
+        return False, "O torneio precisa de pelo menos 2 inscritos para começar."
     if item.get("started_at"):
         return False, "Esta atividade já foi iniciada."
     try:
@@ -5094,8 +5096,6 @@ def iniciar_atividade_com_cobranca(interaction, item, tipo, pagamento="coins"):
     )
     if tipo == "torneio":
         participantes = [str(x) for x in item.get("participants", [])]
-        if len(participantes) < 2:
-            return interaction.response.send_message("O torneio precisa de pelo menos 2 inscritos para começar.", ephemeral=True)
         item["scores"] = {uid: 0.0 for uid in participantes}
         item["opponents"] = {uid: [] for uid in participantes}
         item["byes"] = []
@@ -5164,6 +5164,8 @@ class PaymentChoiceView(discord.ui.View):
 
 
 def iniciar_atividade_sem_cobranca(interaction, item, tipo):
+    if tipo == "torneio" and len(item.get("participants", [])) < 2:
+        return interaction.response.send_message("O torneio precisa de pelo menos 2 inscritos para começar.", ephemeral=True)
     if item.get("started_at"):
         return interaction.response.send_message("Esta atividade já foi iniciada.", ephemeral=True)
     anterior = copiar_json(item)
@@ -5180,10 +5182,6 @@ def iniciar_atividade_sem_cobranca(interaction, item, tipo):
     )
     if tipo == "torneio":
         participantes = [str(x) for x in item.get("participants", [])]
-        if len(participantes) < 2:
-            item.clear()
-            item.update(anterior)
-            return False, "O torneio precisa de pelo menos 2 inscritos para começar."
         item["scores"] = {uid: 0.0 for uid in participantes}
         item["opponents"] = {uid: [] for uid in participantes}
         item["byes"] = []
@@ -6623,8 +6621,9 @@ class CriarTorneioModal(discord.ui.Modal):
         )
 
         self.formato = discord.ui.TextInput(
-            label="Formato",
-            placeholder="suico, todos_contra_todos ou eliminacao",
+            label="Formato (único disponível: suíço)",
+            placeholder="suico",
+            default="suico",
             max_length=30
         )
 
@@ -7672,7 +7671,7 @@ async def torneios(interaction):
 
     lista = [
         t for t in torneios_do_servidor(interaction.guild_id)
-        if t.get("status") in ("inscricoes", "em_andamento", "ativo")
+        if t.get("format") == "suico" and t.get("status") in ("inscricoes", "em_andamento", "ativo")
     ]
 
     if not lista:
