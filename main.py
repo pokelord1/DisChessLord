@@ -4859,14 +4859,14 @@ class ConfirmResetView(discord.ui.View):
     escopo="Quem será resetado",
     titulo="Resetar também o título?",
     nick="Resetar também o nick?",
-    jogador="Jogador específico (usado no escopo correspondente)"
+    jogador="Nick global definido em /nick (também aceita ID ou menção)"
 )
 async def resetar(
     interaction,
     escopo: app_commands.Choice[str],
     titulo: app_commands.Choice[str],
     nick: app_commands.Choice[str],
-    jogador: discord.User = None
+    jogador: str = None
 ):
     if interaction.user.id not in USUARIOS_AUTORIZADOS_RESET:
         await interaction.response.send_message(
@@ -4875,18 +4875,23 @@ async def resetar(
         )
         return
 
+    jogador_resolvido = None
     if escopo.value == "me":
         ids_reset = [str(interaction.user.id)]
     elif escopo.value == "all":
         ids_reset = list(user_data.keys())
     elif escopo.value == "selected":
-        if jogador is None:
+        if not jogador or not jogador.strip():
             await interaction.response.send_message(
-                "Selecione o jogador que será resetado.",
+                "Informe o nick global do jogador definido em /nick.",
                 ephemeral=True
             )
             return
-        ids_reset = [str(jogador.id)]
+        jogador_resolvido, erro = await buscar_jogador_global(jogador)
+        if erro:
+            await interaction.response.send_message(erro, ephemeral=True)
+            return
+        ids_reset = [str(jogador_resolvido["id"])]
     else:
         return
 
@@ -4908,15 +4913,15 @@ async def resetar(
     reset_nick = nick.value == "sim"
 
     descricao = (
-        f"Você está prestes a resetar **{len(ids_reset)} perfil(s)**.\\n"
-        "ELO, Peak, estatísticas e histórico serão apagados.\\n"
+        f"Você está prestes a resetar **{len(ids_reset)} perfil(s)**.\n"
+        "ELO, Peak, estatísticas e histórico serão apagados.\n"
         f"Nick: **{'será apagado' if reset_nick else 'será mantido'}** • "
-        f"Título: **{'será apagado' if reset_titulo else 'será mantido'}**\\n"
+        f"Título: **{'será apagado' if reset_titulo else 'será mantido'}**\n"
         "Um backup será criado antes."
     )
 
-    if jogador is not None and escopo.value == "selected":
-        descricao += f"\\n\\nJogador: {jogador.mention}"
+    if jogador_resolvido is not None:
+        descricao += f"\n\nJogador: **{jogador_resolvido['nick']}**"
 
     view = ConfirmResetView(
         ids_reset,
